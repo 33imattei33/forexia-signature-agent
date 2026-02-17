@@ -287,19 +287,30 @@ class HegelianDialecticEngine:
             return (False, None)
 
         # The reversal direction — OPPOSITE to induction
+        # Use a rolling window to avoid single-candle noise on M1
+        lookback = min(10, len(ny_candles))
+        recent_candles = ny_candles[-lookback:]
+        recent_close = ny_candles[-1].close
+        
+        # Trend: compare current close to the average of the first half of the window
+        first_half = recent_candles[:max(1, lookback // 2)]
+        first_half_avg = sum(c.close for c in first_half) / len(first_half)
+
         if self._london_direction == "UP":
             # London trapped LONGS — NY reversal is SHORT
             # We need to see price moving back below the Asian range
             asian_high = self._asian_range[0] if self._asian_range else 0
-            recent_close = ny_candles[-1].close
-            prev_close = ny_candles[-2].close if len(ny_candles) >= 2 else recent_close
 
-            # Price is reversing back DOWN through the Asian high
-            if recent_close < prev_close and recent_close <= asian_high:
+            # Price is reversing back DOWN through/near the Asian high
+            reversing_down = recent_close < first_half_avg
+            near_or_below_range = recent_close <= asian_high + (asian_high * 0.0002)
+
+            if reversing_down and near_or_below_range:
                 self._solution_phase_active = True
                 logger.info(
                     f"══╡ SYNTHESIS (Solution) — NY Reversal CONFIRMED! "
                     f"Direction: SELL (opposing London's upside induction). "
+                    f"Close {recent_close:.5f} vs Asian High {asian_high:.5f}. "
                     f"Dumb money longs are getting liquidated ╞══"
                 )
                 return (True, "SELL")
@@ -307,15 +318,17 @@ class HegelianDialecticEngine:
         elif self._london_direction == "DOWN":
             # London trapped SHORTS — NY reversal is LONG
             asian_low = self._asian_range[1] if self._asian_range else 0
-            recent_close = ny_candles[-1].close
-            prev_close = ny_candles[-2].close if len(ny_candles) >= 2 else recent_close
 
-            # Price is reversing back UP through the Asian low
-            if recent_close > prev_close and recent_close >= asian_low:
+            # Price is reversing back UP through/near the Asian low
+            reversing_up = recent_close > first_half_avg
+            near_or_above_range = recent_close >= asian_low - (asian_low * 0.0002)
+
+            if reversing_up and near_or_above_range:
                 self._solution_phase_active = True
                 logger.info(
                     f"══╡ SYNTHESIS (Solution) — NY Reversal CONFIRMED! "
                     f"Direction: BUY (opposing London's downside induction). "
+                    f"Close {recent_close:.5f} vs Asian Low {asian_low:.5f}. "
                     f"Dumb money shorts are getting squeezed ╞══"
                 )
                 return (True, "BUY")
@@ -406,6 +419,17 @@ class HegelianDialecticEngine:
         self._induction_detected = False
         self._solution_phase_active = False
         logger.info("═══ Daily Dialectic Reset — New cycle begins ═══")
+
+    def reset_symbol(self):
+        """
+        Reset per-symbol state to prevent cross-pair contamination.
+        Called before each symbol analysis in the scan loop.
+        """
+        self._asian_range = None
+        self._london_extreme = None
+        self._london_direction = None
+        self._induction_detected = False
+        self._solution_phase_active = False
 
     # ─────────────────────────────────────────────────────────────────
     #  UTILITIES

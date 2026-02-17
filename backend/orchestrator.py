@@ -418,11 +418,13 @@ class ForexiaOrchestrator:
                 self.trauma.arm(catalyst)
 
         # ── Get candle data if not provided ──
+        # Dynamic candle count: enough to span Asian → London → NY
         if candles is None and self.bridge.is_connected:
-            candles = await self.bridge.get_candles(symbol, timeframe, 100)
+            candle_count = self._calculate_candle_count(timeframe, utc_now)
+            candles = await self.bridge.get_candles(symbol, timeframe, candle_count)
 
         if not candles or len(candles) < 20:
-            logger.warning(f"[{symbol}] Insufficient candle data")
+            logger.warning(f"[{symbol}] Insufficient candle data ({len(candles) if candles else 0} candles)")
             return None
 
         # ── Build liquidity zones ──
@@ -454,8 +456,12 @@ class ForexiaOrchestrator:
             return None
 
         # ── GATE 5: Hegelian Dialectic Analysis ──
+        # Reset per-symbol to prevent cross-pair state leaking
+        self.dialectic.reset_symbol()
+        
         # Calculate Asian range (the Problem)
-        self.dialectic.calculate_asian_range(candles)
+        asian_range = self.dialectic.calculate_asian_range(candles)
+        asian_ok = asian_range and asian_range[0] > 0
 
         # Detect London induction (the Reaction)
         induction_detected, induction_dir, extreme = \
@@ -463,6 +469,15 @@ class ForexiaOrchestrator:
 
         # Detect NY reversal (the Solution)
         ny_reversal, ny_direction = self.dialectic.detect_ny_reversal(candles)
+
+        # ── Diagnostic logging ──
+        logger.info(
+            f"[{symbol}] Pipeline status: "
+            f"asian_range={'OK' if asian_ok else 'NONE'} | "
+            f"induction={'YES '+str(induction_dir) if induction_detected else 'NO'} | "
+            f"ny_reversal={'YES '+str(ny_direction) if ny_reversal else 'NO'} | "
+            f"candles={len(candles)} ({candles[0].timestamp.strftime('%H:%M')}-{candles[-1].timestamp.strftime('%H:%M')} UTC)"
+        )
 
         # ── GATE 6: Signature Trade Detection ──
         # Reset signature detector per-pair to prevent state bleeding
@@ -500,8 +515,28 @@ class ForexiaOrchestrator:
             signal_type = SignalType.LIQUIDITY_SWEEP
             stop_extreme = extreme or current_price
 
+        # ── FALLBACK: Momentum signal when Hegelian pipeline has no data ──
+        momentum_fired = False
+        if not trade_direction:
+            fb_dir, fb_entry, fb_extreme = self._momentum_fallback(
+                symbol, candles, session_phase, liquidity_zones
+            )
+            if fb_dir:
+                trade_direction = fb_dir
+                entry_price = fb_entry
+                signal_type = SignalType.MOMENTUM_REVERSAL
+                stop_extreme = fb_extreme
+                momentum_fired = True
+                logger.info(
+                    f"[{symbol}] Momentum fallback fired: {fb_dir.value} @ {fb_entry:.5f}"
+                )
+
         if not trade_direction or not entry_price:
-            logger.debug(f"[{symbol}] No actionable signal at this time")
+            logger.info(
+                f"[{symbol}] No signal — gates blocked: "
+                f"sig={bool(sig_direction)}, wtf={bool(wtf_direction)}, "
+                f"ny_rev={ny_reversal}, momentum={momentum_fired}"
+            )
             return None
 
         # ── GATE 7: Candlestick Anatomy Confirmation ──
@@ -721,6 +756,7 @@ class ForexiaOrchestrator:
             SignalType.TRAUMA_REVERSAL: 0.9,         # God candle reversal
             SignalType.WTF_PATTERN: 0.85,            # Midweek reversal
             SignalType.LIQUIDITY_SWEEP: 0.65,        # Simple sweep
+            SignalType.MOMENTUM_REVERSAL: 0.55,     # Momentum fallback
         }
         type_score = type_scores.get(signal_type, 0.5)
 
@@ -754,6 +790,145 @@ class ForexiaOrchestrator:
         )
 
         return round(min(1.0, max(0.0, confidence)), 3)
+
+    # ─────────────────────────────────────────────────────────────────
+    #  CANDLE COUNT CALCULATOR
+    # ─────────────────────────────────────────────────────────────────
+
+    def _calculate_candle_count(self, timeframe: str, utc_now: datetime) -> int:
+        """
+        Calculate how many candles to request so we cover the full
+        Asian → London → NY session sequence.
+        
+        For M1 at 17:00 UTC, we need candles back to 00:00 UTC = 1020 candles.
+        For M15, 100 candles covers ~25 hours — always enough.
+        """
+        tf_minutes = {
+            "M1": 1, "M5": 5, "M15": 15, "M30": 30,
+            "H1": 60, "H4": 240, "D1": 1440, "W1": 10080,
+        }
+        tf_min = tf_minutes.get(timeframe, 15)
+        
+        # We need candles from midnight UTC (Asian start) to now
+        hours_since_midnight = utc_now.hour + utc_now.minute / 60.0
+        minutes_needed = int(hours_since_midnight * 60) + 120  # +2h buffer
+        
+        candle_count = max(200, minutes_needed // tf_min)
+        candle_count = min(candle_count, 2000)  # API safety cap
+        
+        return candle_count
+
+    # ─────────────────────────────────────────────────────────────────
+    #  MOMENTUM FALLBACK — GENERATES SIGNALS WITHOUT HEGELIAN PREREQS
+    # ─────────────────────────────────────────────────────────────────
+
+    def _momentum_fallback(
+        self,
+        symbol: str,
+        candles: List[CandleData],
+        session_phase: SessionPhase,
+        liquidity_zones: List[LiquidityZone],
+    ) -> tuple:
+        """
+        Fallback signal generator using momentum + wick analysis.
+        
+        Fires when the Hegelian pipeline can't generate signals (e.g. no 
+        Asian range data, no London induction). Uses:
+          - EMA crossover (8 vs 21 period)
+          - Wick rejection ratio (exhaustion candles)
+          - Recent swing high/low as stop placement
+          - Liquidity zone proximity for confluence
+        
+        Returns:
+            (TradeDirection, entry_price, stop_extreme) or (None, None, None)
+        """
+        if len(candles) < 30:
+            return (None, None, None)
+        
+        # Only fire during active sessions (REACTION or SOLUTION phase)
+        if session_phase not in (SessionPhase.REACTION, SessionPhase.SOLUTION):
+            return (None, None, None)
+        
+        closes = [c.close for c in candles]
+        
+        # EMA calculation
+        def ema(data, period):
+            if len(data) < period:
+                return data[-1]
+            k = 2 / (period + 1)
+            result = sum(data[:period]) / period
+            for val in data[period:]:
+                result = val * k + result * (1 - k)
+            return result
+        
+        ema_fast = ema(closes, 8)
+        ema_slow = ema(closes, 21)
+        ema_trend = ema(closes, 50) if len(closes) >= 50 else ema(closes, 21)
+        
+        current_price = closes[-1]
+        
+        # Determine momentum direction
+        bullish_cross = ema_fast > ema_slow and current_price > ema_trend
+        bearish_cross = ema_fast < ema_slow and current_price < ema_trend
+        
+        if not bullish_cross and not bearish_cross:
+            return (None, None, None)
+        
+        # Check for wick rejection in recent 5 candles (exhaustion signal)
+        recent = candles[-5:]
+        has_rejection = False
+        for c in recent:
+            rng = c.high - c.low
+            if rng < 0.00001:
+                continue
+            if bullish_cross:
+                # Look for lower wick rejection (bullish)
+                lower_wick = min(c.open, c.close) - c.low
+                if lower_wick / rng >= 0.55:
+                    has_rejection = True
+                    break
+            else:
+                # Look for upper wick rejection (bearish)
+                upper_wick = c.high - max(c.open, c.close)
+                if upper_wick / rng >= 0.55:
+                    has_rejection = True
+                    break
+        
+        # Require at least wick rejection OR strong EMA separation
+        ema_separation = abs(ema_fast - ema_slow) / current_price
+        if not has_rejection and ema_separation < 0.0003:
+            return (None, None, None)
+        
+        # Check liquidity zone proximity for confluence
+        near_zone = False
+        for zone in liquidity_zones:
+            if zone.swept:
+                continue
+            dist = abs(current_price - zone.level) / current_price
+            if dist < 0.001:  # Within 10 pips equivalent
+                near_zone = True
+                break
+        
+        # Calculate stop extreme from recent swing
+        lookback = candles[-20:]
+        if bullish_cross:
+            direction = TradeDirection.BUY
+            stop_extreme = min(c.low for c in lookback)
+        else:
+            direction = TradeDirection.SELL
+            stop_extreme = max(c.high for c in lookback)
+        
+        # Require either liquidity zone proximity or wick rejection
+        if not near_zone and not has_rejection:
+            return (None, None, None)
+        
+        logger.info(
+            f"[{symbol}] Momentum fallback: {direction.value} | "
+            f"EMA8={ema_fast:.5f} EMA21={ema_slow:.5f} | "
+            f"rejection={has_rejection} zone={near_zone}"
+        )
+        
+        return (direction, current_price, stop_extreme)
 
     # ─────────────────────────────────────────────────────────────────
     #  LIQUIDITY ZONE BUILDER

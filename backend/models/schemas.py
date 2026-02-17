@@ -54,6 +54,7 @@ class SignalType(str, Enum):
     TRAUMA_REVERSAL = "TRAUMA_REVERSAL"         # God Candle exhaustion play
     WTF_PATTERN = "WTF_MIDWEEK_REVERSAL"        # Wednesday reversal
     LIQUIDITY_SWEEP = "LIQUIDITY_SWEEP"         # Pure stop hunt scalp
+    MOMENTUM_REVERSAL = "MOMENTUM_REVERSAL"     # EMA + wick rejection fallback
 
 
 class InductionState(str, Enum):
