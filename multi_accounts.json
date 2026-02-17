@@ -1,0 +1,45 @@
+{
+  "accounts": [
+    {
+      "account_id": "E8_1",
+      "firm_type": "E8_MARKETS",
+      "login": 000000,
+      "password": "your_email@example.com:YOUR_PASSWORD",
+      "server": "https://mtr.e8markets.com",
+      "symbols": ["EURUSD.", "GBPUSD.", "USDCHF.", "USDJPY."],
+      "enabled": true
+    },
+    {
+      "account_id": "APEX_1",
+      "firm_type": "APEX",
+      "login": 0,
+      "password": "",
+      "server": "MetaQuotes-Demo",
+      "mt5_path": "C:\\Program Files\\MetaTrader 5 APEX\\terminal64.exe",
+      "symbols": ["EURUSD", "GBPUSD", "US100", "USDJPY"],
+      "enabled": false
+    },
+    {
+      "account_id": "GL_1",
+      "firm_type": "GET_LEVERAGED",
+      "login": 0,
+      "password": "",
+      "server": "",
+      "mt5_path": "C:\\Program Files\\MetaTrader 5 GL\\terminal64.exe",
+      "symbols": ["EURUSD", "GBPUSD", "USDJPY"],
+      "enabled": false
+    },
+    {
+      "account_id": "DNA_1",
+      "firm_type": "DNA_FUNDED",
+      "login": 0,
+      "password": "",
+      "server": "",
+      "mt5_path": "C:\\Program Files\\MetaTrader 5 DNA\\terminal64.exe",
+      "symbols": ["EURUSD", "GBPUSD", "USDCHF"],
+      "enabled": false
+    }
+  ],
+  "scan_interval": 120,
+  "max_risk_pct": 2.0
+}
