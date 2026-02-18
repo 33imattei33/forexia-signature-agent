@@ -815,12 +815,26 @@ class MatchTraderBridge:
         }
         """
         if not self._connected:
+            logger.error(f"close_by_id('{search_key}'): Bridge not connected")
             return False
 
         # Find the position to get its details
+        logger.info(f"close_by_id: Searching for position '{search_key}'...")
         position = await self._find_position(search_key)
         if not position:
-            logger.error(f"Position '{search_key}' not found for close")
+            logger.error(
+                f"close_by_id: Position '{search_key}' NOT FOUND. "
+                f"Fetching all positions for debug..."
+            )
+            # Debug: list all current positions
+            data = await self._get(self._mtr_path("open-positions"))
+            if data and isinstance(data, dict):
+                all_pos = data.get("positions", [])
+                for p in all_pos:
+                    logger.error(
+                        f"  Available position: id='{p.get('id')}', "
+                        f"symbol='{p.get('symbol')}', side='{p.get('side')}'"
+                    )
             return False
 
         close_data = {
@@ -831,20 +845,23 @@ class MatchTraderBridge:
         }
 
         logger.info(
-            f"Closing position: id={position['id']}, "
-            f"instrument={position['symbol']}, side={position['side']}, "
-            f"volume={position['volume']}"
+            f"close_by_id: Sending close request — "
+            f"positionId={position['id']}, instrument={position['symbol']}, "
+            f"orderSide={position['side']}, volume={position['volume']}"
         )
 
         url = self._mtr_path("position/close")
         result = await self._post(url, close_data)
 
         if result and (result.get("status") or "").upper() == "OK":
-            logger.info(f"MatchTrader position {position['id']} CLOSED")
+            logger.info(f"MatchTrader position {position['id']} CLOSED successfully")
             return True
 
         error_msg = (result or {}).get("errorMessage", "Unknown error")
-        logger.error(f"MatchTrader close failed for {position['id']}: {error_msg}")
+        logger.error(
+            f"MatchTrader close FAILED for {position['id']}: "
+            f"error={error_msg}, full_response={result}"
+        )
         return False
 
     async def close_all_trades(self, symbol: Optional[str] = None) -> int:

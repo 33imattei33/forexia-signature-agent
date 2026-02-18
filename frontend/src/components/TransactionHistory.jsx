@@ -34,6 +34,14 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
   const [expanded, setExpanded] = useState(false);
   const [closingIds, setClosingIds] = useState(new Set());   // IDs currently being closed
   const [closingAll, setClosingAll] = useState(false);        // "Close All" in progress
+  const [toast, setToast] = useState(null);                   // {type: 'ok'|'err', msg: '...'}
+
+  // Auto-dismiss toast after 4 seconds
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   const fetchHistory = useCallback(async () => {
     try {
@@ -56,25 +64,30 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
     const key = row.id || String(row.ticket);
     if (!key || closingIds.has(key)) return;
 
+    const sym = (row.symbol || '').replace('.', '');
     setClosingIds((prev) => new Set(prev).add(key));
     try {
       const body = {};
       if (row.id) body.id = row.id;
       if (row.ticket) body.ticket = row.ticket;
 
+      console.log('[CLOSE] Sending close request:', JSON.stringify(body));
       const res = await fetch('/api/trade/close', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
       const data = await res.json();
+      console.log('[CLOSE] Response:', JSON.stringify(data));
       if (data.status === 'OK') {
-        // Immediately refresh
+        setToast({ type: 'ok', msg: `${sym} ${row.side} closed successfully` });
         await fetchHistory();
       } else {
+        setToast({ type: 'err', msg: `Close failed: ${data.message || 'Unknown error'}` });
         console.error('Close failed:', data.message);
       }
     } catch (err) {
+      setToast({ type: 'err', msg: `Close error: ${err.message}` });
       console.error('Close error:', err);
     } finally {
       setClosingIds((prev) => {
@@ -90,17 +103,23 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
     if (closingAll) return;
     setClosingAll(true);
     try {
+      console.log('[CLOSE-ALL] Sending close-all request');
       const res = await fetch('/api/close-all', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       });
       const data = await res.json();
-      if (data.status === 'OK' || data.closed > 0) {
+      console.log('[CLOSE-ALL] Response:', JSON.stringify(data));
+      if (data.status === 'OK') {
+        const n = data.closed_count || 0;
+        setToast({ type: 'ok', msg: `All positions closed (${n})` });
         await fetchHistory();
       } else {
+        setToast({ type: 'err', msg: `Close-all failed: ${data.message || 'Unknown error'}` });
         console.error('Close-all failed:', data);
       }
     } catch (err) {
+      setToast({ type: 'err', msg: `Close-all error: ${err.message}` });
       console.error('Close-all error:', err);
     } finally {
       setClosingAll(false);
@@ -209,6 +228,17 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
           )}
         </div>
       </div>
+
+      {/* Toast notification */}
+      {toast && (
+        <div className={`mb-2 px-3 py-1.5 rounded text-[10px] font-bold border transition-all ${
+          toast.type === 'ok'
+            ? 'bg-forexia-green/10 text-forexia-green border-forexia-green/20'
+            : 'bg-forexia-red/10 text-forexia-red border-forexia-red/20'
+        }`}>
+          {toast.type === 'ok' ? '✓ ' : '✗ '}{toast.msg}
+        </div>
+      )}
 
       {/* Table */}
       {rows.length === 0 ? (

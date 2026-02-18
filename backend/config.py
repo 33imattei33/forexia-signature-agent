@@ -199,7 +199,14 @@ class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 8000
     webhook_secret: str = os.getenv("FOREXIA_WEBHOOK_SECRET", "change_me")
-    cors_origins: List[str] = field(default_factory=lambda: ["http://localhost:3000"])
+    cors_origins: List[str] = field(default_factory=lambda: [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8000",
+    ])
     log_level: str = "INFO"
 
 

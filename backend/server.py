@@ -405,10 +405,17 @@ async def get_multi_pair_status():
 @app.post("/api/close-all")
 async def close_all_positions():
     """Emergency close all positions."""
-    if orchestrator.bridge.is_connected:
-        closed = await orchestrator.bridge.close_all_trades()
+    try:
+        bridge = orchestrator.bridge
+        if not bridge or not bridge.is_connected:
+            return {"status": "ERROR", "message": "Broker not connected"}
+        logger.info("[CLOSE-ALL] Closing all open positions...")
+        closed = await bridge.close_all_trades()
+        logger.info(f"[CLOSE-ALL] Closed {closed} positions")
         return {"status": "OK", "closed_count": closed}
-    return {"status": "ERROR", "message": "Broker not connected"}
+    except Exception as e:
+        logger.error(f"[CLOSE-ALL] Exception: {e}", exc_info=True)
+        return {"status": "ERROR", "message": f"Server error: {str(e)}"}
 
 
 @app.post("/api/reset/daily")
@@ -565,27 +572,35 @@ async def close_single_trade(request: Request):
     Body: { "ticket": 12345 } or { "id": "W12345" } or both.
     Prefers the string 'id' field for exact matching with the broker API.
     """
-    bridge = orchestrator.bridge
-    if not bridge or not bridge.is_connected:
-        return {"status": "ERROR", "message": "Broker not connected"}
+    try:
+        bridge = orchestrator.bridge
+        if not bridge or not bridge.is_connected:
+            logger.warning("Close request received but broker not connected")
+            return {"status": "ERROR", "message": "Broker not connected"}
 
-    body = await request.json()
-    ticket = body.get("ticket")
-    pos_id = body.get("id")  # Original string ID like "W4250023165791583"
+        body = await request.json()
+        ticket = body.get("ticket")
+        pos_id = body.get("id")  # Original string ID like "W4250023165791583"
+        logger.info(f"[CLOSE] Received close request — ticket={ticket}, id={pos_id}, body={body}")
 
-    if not ticket and not pos_id:
-        return {"status": "ERROR", "message": "Ticket ID or position ID required"}
+        if not ticket and not pos_id:
+            return {"status": "ERROR", "message": "Ticket ID or position ID required"}
 
-    # Prefer string ID for exact broker API matching, fall back to numeric ticket
-    search_key = str(pos_id) if pos_id else str(ticket)
-    logger.info(f"Close request: ticket={ticket}, id={pos_id}, search_key={search_key}")
+        # Prefer string ID for exact broker API matching, fall back to numeric ticket
+        search_key = str(pos_id) if pos_id else str(ticket)
+        logger.info(f"[CLOSE] Searching for position with key: '{search_key}'")
 
-    result = await bridge.close_by_id(search_key)
-    if result:
-        orchestrator._account = await bridge.get_account_state()
-        logger.info(f"Position {search_key} closed via dashboard")
-        return {"status": "OK", "id": search_key}
-    return {"status": "ERROR", "message": f"Failed to close position {search_key}"}
+        result = await bridge.close_by_id(search_key)
+        if result:
+            orchestrator._account = await bridge.get_account_state()
+            logger.info(f"[CLOSE] SUCCESS — Position {search_key} closed via dashboard")
+            return {"status": "OK", "id": search_key}
+
+        logger.error(f"[CLOSE] FAILED — bridge.close_by_id('{search_key}') returned False")
+        return {"status": "ERROR", "message": f"Failed to close position {search_key}"}
+    except Exception as e:
+        logger.error(f"[CLOSE] Exception in close_single_trade: {e}", exc_info=True)
+        return {"status": "ERROR", "message": f"Server error: {str(e)}"}
 
 
 @app.post("/api/trade/modify")
