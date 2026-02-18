@@ -3,9 +3,9 @@
     {
       "account_id": "E8_1",
       "firm_type": "E8_MARKETS",
-      "login": 000000,
+      "login": 0,
       "password": "your_email@example.com:YOUR_PASSWORD",
-      "server": "https://mtr.e8markets.com",
+      "server": "https://your-broker-server.com",
       "symbols": ["EURUSD.", "GBPUSD.", "USDCHF.", "USDJPY."],
       "enabled": true
     },

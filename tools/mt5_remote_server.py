@@ -25,16 +25,17 @@ import json
 import logging
 import asyncio
 from datetime import datetime, timezone
+import os
 from typing import Optional
 
 # ═══════════════════════════════════════════════════════════════
-#  CONFIG — Edit these values
+#  CONFIG — Edit these values (or set via environment variables)
 # ═══════════════════════════════════════════════════════════════
-MT5_LOGIN = 000000000           # Your MT5 account number
-MT5_PASSWORD = "YOUR_PASSWORD"    # Your MT5 password
-MT5_SERVER = "FxPro-MT5 Demo"   # Your broker server
-MT5_PATH = ""                   # Optional: path to terminal64.exe
-AUTH_KEY = "change_me"  # Auth key (change this!)
+MT5_LOGIN = int(os.getenv("MT5_LOGIN", "0"))        # Your MT5 account number
+MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")         # Your MT5 password
+MT5_SERVER = os.getenv("MT5_SERVER", "")             # Your broker server
+MT5_PATH = os.getenv("MT5_PATH", "")                 # Optional: path to terminal64.exe
+AUTH_KEY = os.getenv("MT5_AUTH_KEY", "change_me")    # Auth key (change this!)
 HOST = "0.0.0.0"                # Listen on all interfaces
 PORT = 8089                     # Server port
 # ═══════════════════════════════════════════════════════════════

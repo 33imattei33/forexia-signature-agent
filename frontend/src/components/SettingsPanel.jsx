@@ -217,7 +217,7 @@ export default function SettingsPanel({ isOpen, onClose }) {
       broker: {
         ...settings.broker,
         platform: 'matchtrader',
-        matchtrader_url: 'https://mtr.e8markets.com',
+        matchtrader_url: '',
         matchtrader_login: e8Email,
         matchtrader_password: e8Password,
         matchtrader_partner_id: '2',

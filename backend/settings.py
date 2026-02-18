@@ -36,7 +36,7 @@ class BrokerSettings(BaseModel):
     remote_mt5_url: str = Field(default="", description="URL of the MT5 Remote Server (e.g. http://192.168.1.10:8089)")
     remote_mt5_auth_key: str = Field(default="change_me", description="Auth key for the remote MT5 server")
     # MatchTrader settings (cross-platform — broker REST API)
-    matchtrader_url: str = Field(default="https://mtr.e8markets.com", description="MatchTrader API base URL (e.g. https://mtr.e8markets.com)")
+    matchtrader_url: str = Field(default="", description="MatchTrader API base URL")
     matchtrader_login: str = Field(default="", description="MatchTrader email address")
     matchtrader_password: str = Field(default="", description="MatchTrader account password")
     matchtrader_partner_id: str = Field(default="", description="Broker partner ID (auto-discovered if empty, E8 Markets = 2)")

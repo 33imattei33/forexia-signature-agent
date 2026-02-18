@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Test E8 Markets login with correct brokerId using curl_cffi."""
+"""Test broker login with correct brokerId using curl_cffi."""
 from curl_cffi.requests import Session
 import json
+import os
 
-base = 'https://mtr.e8markets.com'
+base = os.getenv('BROKER_URL', 'https://your-broker-server.com')
 
 # Test with correct brokerId=2
 print("--- Login with brokerId=2 ---")
@@ -12,9 +13,9 @@ s = Session(impersonate='chrome')
 r = s.post(
     f'{base}/manager/mtr-login',
     json={
-        'email': 'your_email@example.com',
-        'password': 'YOUR_PASSWORD',
-        'brokerId': '2',
+        'email': os.getenv('BROKER_EMAIL', 'your_email@example.com'),
+        'password': os.getenv('BROKER_PASSWORD', 'YOUR_PASSWORD'),
+        'brokerId': os.getenv('BROKER_ID', '2'),
     },
     headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
     timeout=15,
@@ -70,14 +71,14 @@ if r.status_code == 200:
 else:
     print(f"Body: {r.text[:500]}")
 
-# Test with wrong brokerId=000000
-print("\n--- Login with brokerId=000000 (wrong) ---")
+# Test with wrong brokerId
+print("\n--- Login with wrong brokerId ---")
 r3 = s.post(
     f'{base}/manager/mtr-login',
     json={
-        'email': 'your_email@example.com',
-        'password': 'YOUR_PASSWORD',
-        'brokerId': '000000',
+        'email': os.getenv('BROKER_EMAIL', 'your_email@example.com'),
+        'password': os.getenv('BROKER_PASSWORD', 'YOUR_PASSWORD'),
+        'brokerId': '999999',
     },
     headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
     timeout=15,
