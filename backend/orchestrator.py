@@ -26,7 +26,7 @@ discipline, not retail gambling.
 import logging
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 
 from backend.config import CONFIG
@@ -92,6 +92,15 @@ class ForexiaOrchestrator:
         self._news_refresh_task: Optional[asyncio.Task] = None
         self._auto_scan_task: Optional[asyncio.Task] = None
         self._settings = SETTINGS
+
+        # ── Win-Rate Protection ──
+        # Per-pair SL cooldown: { "EURUSD:BUY": (hit_count, last_sl_time) }
+        self._sl_cooldown: Dict[str, tuple] = {}
+        # JPY cross pairs (avoid during Asian session)
+        self._jpy_crosses = {
+            "USDJPY", "EURJPY", "GBPJPY", "AUDJPY", "NZDJPY",
+            "CADJPY", "CHFJPY",
+        }
 
     @property
     def bridge(self):
@@ -298,7 +307,7 @@ class ForexiaOrchestrator:
         and executes trades when auto_trade is ON and signals meet
         the minimum confidence threshold.
         """
-        scan_interval = 45  # 45 seconds — fast enough to catch entries
+        scan_interval = 120  # 120 seconds — gives trades room to develop
         logger.info("Auto-Scan Loop: Running every %d seconds", scan_interval)
 
         while self._running:
@@ -319,14 +328,37 @@ class ForexiaOrchestrator:
                 signals_found = 0
                 trades_executed = 0
 
-                # Refresh account state before scan cycle
+                # Refresh account state + open positions before scan cycle
                 try:
                     self._account = await self.bridge.get_account_state()
                 except Exception:
                     pass
 
+                # Get current open positions to enforce 1-per-symbol limit
+                open_symbols = set()
+                try:
+                    positions = await self.bridge.get_open_positions()
+                    for pos in positions:
+                        sym = (pos.get("symbol") or "").rstrip(".")
+                        if sym:
+                            open_symbols.add(sym)
+                except Exception:
+                    pass
+
                 for symbol in pairs:
                     try:
+                        # ── WIN-RATE GUARD 1: Max 1 position per symbol ──
+                        if symbol in open_symbols:
+                            continue
+
+                        # ── WIN-RATE GUARD 2: Per-pair SL cooldown ──
+                        if self._is_on_cooldown(symbol):
+                            continue
+
+                        # ── WIN-RATE GUARD 3: Session-pair filter ──
+                        if not self._is_pair_allowed_this_session(symbol):
+                            continue
+
                         signal = await self.analyze(
                             symbol=symbol,
                             timeframe=timeframe,
@@ -338,6 +370,7 @@ class ForexiaOrchestrator:
                                 trade = await self.execute_signal(signal)
                                 if trade and trade.status == TradeStatus.EXECUTED:
                                     trades_executed += 1
+                                    open_symbols.add(symbol)  # Track newly opened
                                     logger.info(
                                         f"Auto-Scan EXECUTED: {signal.direction.value} "
                                         f"{signal.lot_size} {symbol} (conf: {signal.confidence:.0%})"
@@ -349,6 +382,28 @@ class ForexiaOrchestrator:
                     f"Auto-Scan cycle — {len(pairs)} pairs scanned, "
                     f"{signals_found} signals, {trades_executed} executed"
                 )
+
+                # ── SL HIT DETECTION: Scan recent closures for stop-loss hits ──
+                try:
+                    closed = await self.bridge.get_trade_history()
+                    recent_cutoff = datetime.utcnow() - timedelta(hours=4)
+                    for t in closed:
+                        reason = (t.get("close_reason") or "").lower()
+                        close_time_str = t.get("close_time")
+                        if "sl" in reason or "stop" in reason:
+                            # Parse close_time to check recency
+                            try:
+                                ct = datetime.fromisoformat(
+                                    close_time_str.replace("Z", "+00:00")
+                                ).replace(tzinfo=None)
+                                if ct > recent_cutoff:
+                                    sym = (t.get("symbol") or "").rstrip(".")
+                                    direction = t.get("direction", "BUY")
+                                    self.record_sl_hit(sym, direction)
+                            except Exception:
+                                pass
+                except Exception as e:
+                    logger.debug(f"SL monitor: {e}")
 
             except asyncio.CancelledError:
                 break
@@ -894,9 +949,9 @@ class ForexiaOrchestrator:
                     has_rejection = True
                     break
         
-        # Require at least wick rejection OR strong EMA separation
+        # Require wick rejection AND meaningful EMA separation
         ema_separation = abs(ema_fast - ema_slow) / current_price
-        if not has_rejection and ema_separation < 0.0003:
+        if not has_rejection or ema_separation < 0.0005:
             return (None, None, None)
         
         # Check liquidity zone proximity for confluence
@@ -918,8 +973,8 @@ class ForexiaOrchestrator:
             direction = TradeDirection.SELL
             stop_extreme = max(c.high for c in lookback)
         
-        # Require either liquidity zone proximity or wick rejection
-        if not near_zone and not has_rejection:
+        # Require BOTH liquidity zone proximity AND wick rejection
+        if not near_zone or not has_rejection:
             return (None, None, None)
         
         logger.info(
@@ -1070,3 +1125,76 @@ class ForexiaOrchestrator:
         self.weekly.reset_weekly()
         self._liquidity_zones.clear()
         logger.info("═══ WEEKLY RESET COMPLETE ═══")
+
+    # ─────────────────────────────────────────────────────────────────
+    #  WIN-RATE PROTECTION SYSTEM
+    # ─────────────────────────────────────────────────────────────────
+
+    def record_sl_hit(self, symbol: str, direction: str):
+        """
+        Record that a trade on this symbol+direction hit stop loss.
+        After 2 consecutive SL hits within 4 hours, block the pair for 2 hours.
+        """
+        key = f"{symbol}:{direction}"
+        now = datetime.utcnow()
+        count, last_time = self._sl_cooldown.get(key, (0, None))
+
+        # Reset count if last hit was more than 4 hours ago
+        if last_time and (now - last_time).total_seconds() > 14400:
+            count = 0
+
+        count += 1
+        self._sl_cooldown[key] = (count, now)
+
+        if count >= 2:
+            logger.warning(
+                f"[WIN-RATE] {symbol} {direction} hit SL {count}x — "
+                f"COOLING DOWN for 2 hours"
+            )
+
+    def _is_on_cooldown(self, symbol: str) -> bool:
+        """Check if a symbol is in SL cooldown (any direction)."""
+        now = datetime.utcnow()
+        for key, (count, last_time) in self._sl_cooldown.items():
+            if not key.startswith(f"{symbol}:"):
+                continue
+            if count < 2 or not last_time:
+                continue
+            # 2-hour cooldown after 2+ SL hits
+            elapsed = (now - last_time).total_seconds()
+            if elapsed < 7200:
+                logger.debug(
+                    f"[WIN-RATE] {symbol} ON COOLDOWN — "
+                    f"{count} SL hits, {7200 - elapsed:.0f}s remaining"
+                )
+                return True
+        return False
+
+    def _is_pair_allowed_this_session(self, symbol: str) -> bool:
+        """
+        Session-pair filter to prevent trading pairs in unfavorable sessions.
+
+        Rules:
+          - JPY crosses blocked during Asian session (00:00-07:00 UTC)
+          - Momentum signals only allowed during NY session (13:00-20:00 UTC)
+          - All major pairs allowed during London + NY
+        """
+        utc_hour = datetime.utcnow().hour
+
+        # Asian session (00:00-07:00 UTC): block JPY crosses
+        if 0 <= utc_hour < 7:
+            if symbol in self._jpy_crosses:
+                logger.debug(
+                    f"[WIN-RATE] {symbol} blocked — JPY cross during Asian session"
+                )
+                return False
+
+        return True
+
+    def _tighten_momentum_filter(self, has_rejection: bool, near_zone: bool) -> bool:
+        """
+        Require BOTH wick rejection AND liquidity zone proximity
+        for momentum fallback signals (was OR before).
+        """
+        return has_rejection and near_zone
+

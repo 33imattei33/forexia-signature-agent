@@ -1054,10 +1054,7 @@ class MatchTraderBridge:
         """
         Fetch closed trades / deals from MatchTrader.
 
-        Tries multiple endpoint patterns:
-          - /mtr-api/{uuid}/trading-history
-          - /mtr-api/{uuid}/deals
-          - /mtr-api/{uuid}/closed-positions
+        Uses POST /mtr-api/{uuid}/closed-positions with date range body.
         """
         if not self._connected or not self._client:
             return []
@@ -1065,30 +1062,26 @@ class MatchTraderBridge:
         from_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
         to_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
 
-        endpoints = ["trading-history", "deals", "closed-positions"]
+        url = self._mtr_path("closed-positions")
         data = None
-
-        for ep in endpoints:
-            url = self._mtr_path(ep)
-            try:
-                data = await self._get(url, {"from": from_date, "to": to_date})
-                if data:
-                    logger.info(f"Trade history fetched from /{ep}")
-                    break
-            except Exception:
-                continue
+        try:
+            data = await self._post(url, {"from": from_date, "to": to_date})
+            if data:
+                logger.info("Trade history fetched from /closed-positions (POST)")
+        except Exception as e:
+            logger.error(f"Trade history fetch failed: {e}")
 
         if not data:
             logger.debug("No trade history endpoint available — returning agent-tracked history")
             return []
 
-        # Parse the response (handles various MatchTrader formats)
+        # Parse the response (MatchTrader closed-positions format)
         trades = []
         items = []
         if isinstance(data, list):
             items = data
         elif isinstance(data, dict):
-            items = data.get("deals", data.get("trades", data.get("positions", data.get("history", []))))
+            items = data.get("operations", data.get("deals", data.get("trades", data.get("positions", data.get("history", [])))))
 
         for item in items:
             try:
@@ -1103,7 +1096,8 @@ class MatchTraderBridge:
 
                 # Parse timestamps
                 open_time = item.get("openTime") or item.get("openDate") or ""
-                close_time = item.get("closeTime") or item.get("closeDate") or ""
+                close_time = item.get("time") or item.get("closeTime") or item.get("closeDate") or ""
+                close_reason = item.get("closeReason") or ""
 
                 trades.append({
                     "id": item.get("id") or item.get("dealId") or "",
@@ -1118,6 +1112,7 @@ class MatchTraderBridge:
                     "net_profit": round(profit + swap + commission, 2),
                     "open_time": str(open_time),
                     "close_time": str(close_time),
+                    "close_reason": close_reason,
                     "status": "closed",
                 })
             except Exception as e:

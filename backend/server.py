@@ -326,6 +326,37 @@ async def get_trade_history(days: int = 30):
         except Exception:
             pass
 
+    # 4) Win-rate statistics from closed trades
+    closed_list = result.get("closed", [])
+    if closed_list:
+        wins = [t for t in closed_list if (t.get("profit") or 0) > 0]
+        losses = [t for t in closed_list if (t.get("profit") or 0) < 0]
+        total = len(wins) + len(losses)
+        net_pnl = sum(t.get("profit", 0) for t in closed_list)
+        gross_profit = sum(t.get("profit", 0) for t in wins)
+        gross_loss = abs(sum(t.get("profit", 0) for t in losses))
+        avg_win = gross_profit / len(wins) if wins else 0
+        avg_loss = gross_loss / len(losses) if losses else 0
+
+        result["win_rate_stats"] = {
+            "total_trades": total,
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": round(len(wins) / total * 100, 1) if total else 0,
+            "net_pnl": round(net_pnl, 2),
+            "gross_profit": round(gross_profit, 2),
+            "gross_loss": round(gross_loss, 2),
+            "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss else 0,
+            "avg_win": round(avg_win, 2),
+            "avg_loss": round(avg_loss, 2),
+            "reward_risk_ratio": round(avg_win / avg_loss, 2) if avg_loss else 0,
+        }
+    else:
+        result["win_rate_stats"] = {
+            "total_trades": 0, "wins": 0, "losses": 0,
+            "win_rate": 0, "net_pnl": 0, "profit_factor": 0,
+        }
+
     return result
 
 
