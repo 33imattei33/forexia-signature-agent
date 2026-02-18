@@ -283,8 +283,12 @@ async def get_trade_history(days: int = 30):
             positions = await bridge.get_open_positions()
             for pos in positions:
                 direction = "BUY" if pos.get("type", 0) == 0 else "SELL"
+                pos_id = pos.get("id", "")
+                # Use orchestrator's internal tracking (reliable)
+                # MatchTrader does NOT return comment field in positions
+                is_bot = orchestrator.is_bot_position(pos_id)
                 result["open"].append({
-                    "id": pos.get("id", ""),
+                    "id": pos_id,
                     "ticket": pos.get("ticket", 0),
                     "symbol": (pos.get("symbol") or "").rstrip("."),
                     "side": direction,
@@ -296,6 +300,8 @@ async def get_trade_history(days: int = 30):
                     "swap": round(pos.get("swap", 0), 2),
                     "commission": round(pos.get("commission", 0), 2),
                     "status": "open",
+                    "is_bot": is_bot,
+                    "comment": pos.get("comment", ""),
                 })
         except Exception as e:
             logger.error(f"Trade history — open positions error: {e}")

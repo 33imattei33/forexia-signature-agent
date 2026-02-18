@@ -25,9 +25,11 @@ discipline, not retail gambling.
 
 import logging
 import asyncio
+import json
+import os
 import uuid
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Set
 
 from backend.config import CONFIG
 from backend.models.schemas import (
@@ -105,6 +107,48 @@ class ForexiaOrchestrator:
         # Position Manager state — tracks which positions have been moved to BE
         self._be_applied: set = set()       # position IDs already at breakeven
         self._trailing_sl: Dict[str, float] = {}  # position ID → last trailing SL price
+
+        # ── Bot-Opened Position Tracking ──
+        # MatchTrader does NOT return the comment field in position data,
+        # so we track which positions the bot opened internally.
+        # Persisted to disk so it survives restarts.
+        self._bot_ids_file = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), ".bot_position_ids.json"
+        )
+        self._bot_opened_ids: Set[str] = self._load_bot_ids()
+
+    # ── Bot Position ID Persistence ──
+
+    def _load_bot_ids(self) -> Set[str]:
+        """Load bot-opened position IDs from disk."""
+        try:
+            if os.path.exists(self._bot_ids_file):
+                with open(self._bot_ids_file, "r") as f:
+                    ids = set(json.load(f))
+                    logger.info(f"Loaded {len(ids)} bot-opened position IDs from disk")
+                    return ids
+        except Exception as e:
+            logger.warning(f"Could not load bot position IDs: {e}")
+        return set()
+
+    def _save_bot_ids(self):
+        """Persist bot-opened position IDs to disk."""
+        try:
+            with open(self._bot_ids_file, "w") as f:
+                json.dump(list(self._bot_opened_ids), f)
+        except Exception as e:
+            logger.warning(f"Could not save bot position IDs: {e}")
+
+    def _register_bot_position(self, ticket: int):
+        """Register a position opened by the bot for tracking."""
+        pos_id = f"W{ticket}"
+        self._bot_opened_ids.add(pos_id)
+        self._save_bot_ids()
+        logger.info(f"Registered bot position: {pos_id}")
+
+    def is_bot_position(self, pos_id: str) -> bool:
+        """Check if a position was opened by the bot."""
+        return pos_id in self._bot_opened_ids
 
     @property
     def bridge(self):
@@ -390,8 +434,19 @@ class ForexiaOrchestrator:
                     current_sl = float(pos.get("sl", 0))
                     current_tp = float(pos.get("tp", 0))
                     lots = float(pos.get("lots", 0))
+                    is_bot = pos.get("is_bot", False)
 
                     if not open_price or not ticket or not symbol:
+                        continue
+
+                    # ── SKIP MANUAL ORDERS ──
+                    # Only manage positions opened by the bot.
+                    # MatchTrader does NOT return comments in position data, so
+                    # we use our internal tracking set (_bot_opened_ids) which
+                    # persists to disk and tracks every position the bot opens.
+                    is_bot_tracked = pos_id in self._bot_opened_ids
+                    if not is_bot_tracked:
+                        active_ids.add(pos_id)  # still track for cleanup
                         continue
 
                     active_ids.add(pos_id)
@@ -494,14 +549,15 @@ class ForexiaOrchestrator:
                             stale_key = f"stale_{pos_id}"
                             prev_count = self._trailing_sl.get(stale_key, 0)
                             self._trailing_sl[stale_key] = prev_count + 1
-                            # After 12 checks (60 seconds) while negative, close it
-                            check_count = stale_min // 5  # convert minutes to 5s checks
+                            # After stale_min MINUTES while negative, close it
+                            # Each check = 5 seconds, so minutes × 60 ÷ 5 = checks
+                            check_count = (stale_min * 60) // 5
                             if prev_count >= check_count:
                                 closed = await self.bridge.close_trade(ticket)
                                 if closed:
                                     logger.warning(
                                         f"[STALE EXIT] {symbol} #{ticket} CLOSED — "
-                                        f"Negative {profit_pips:.1f}p for >{stale_min}s, "
+                                        f"Negative {profit_pips:.1f}p for >{stale_min} min, "
                                         f"never reached breakeven"
                                     )
                                     # Record SL hit for cooldown system
@@ -519,6 +575,12 @@ class ForexiaOrchestrator:
                 stale_counters = [k for k in self._trailing_sl if k.startswith("stale_") and k[6:] not in active_ids]
                 for k in stale_counters:
                     self._trailing_sl.pop(k, None)
+                # Clean bot-opened IDs for positions that are no longer open
+                closed_bot_ids = self._bot_opened_ids - active_ids
+                if closed_bot_ids:
+                    self._bot_opened_ids -= closed_bot_ids
+                    self._save_bot_ids()
+                    logger.debug(f"Cleaned {len(closed_bot_ids)} closed bot position IDs")
 
             except asyncio.CancelledError:
                 break
@@ -1000,6 +1062,9 @@ class ForexiaOrchestrator:
         )
 
         if ticket:
+            # Register this position as bot-opened for tracking
+            self._register_bot_position(ticket)
+
             record = TradeRecord(
                 trade_id=signal.signal_id,
                 signal=signal,

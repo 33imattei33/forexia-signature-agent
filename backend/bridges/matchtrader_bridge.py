@@ -720,6 +720,7 @@ class MatchTraderBridge:
             "volume": round(lot_size, 2),
             "slPrice": round(stop_loss, 5) if stop_loss else 0,
             "tpPrice": round(take_profit, 5) if take_profit else 0,
+            "comment": comment or "FOREXIA_SIGNATURE",
             "isMobile": False,
         }
 
@@ -904,9 +905,13 @@ class MatchTraderBridge:
         positions = data.get("positions", [])
         for pos in positions:
             pos_id = pos.get("id", "")
-            # Match by exact ID or by numeric part
             numeric_part = "".join(filter(str.isdigit, pos_id))
-            if pos_id == ticket_str or numeric_part == ticket_str or str(ticket_str) in pos_id:
+            # Match by: exact ID, exact numeric part, or W-prefixed
+            if (
+                pos_id == ticket_str
+                or numeric_part == ticket_str
+                or f"W{ticket_str}" == pos_id
+            ):
                 return {
                     "id": pos_id,
                     "symbol": pos.get("symbol") or pos.get("alias") or "",
@@ -916,6 +921,7 @@ class MatchTraderBridge:
                     "takeProfit": pos.get("takeProfit"),
                     "openPrice": pos.get("openPrice"),
                     "profit": pos.get("profit"),
+                    "comment": pos.get("comment", ""),
                 }
 
         return None
@@ -1070,8 +1076,9 @@ class MatchTraderBridge:
                 "profit": float(pos.get("profit") or pos.get("netProfit") or 0),
                 "swap": float(pos.get("swap") or 0),
                 "commission": float(pos.get("commission") or 0),
-                "comment": "",
+                "comment": pos.get("comment", ""),
                 "magic": 0,
+                "is_bot": "FOREXIA" in (pos.get("comment") or "").upper(),
             })
 
         return result

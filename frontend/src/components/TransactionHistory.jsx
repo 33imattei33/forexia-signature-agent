@@ -315,8 +315,13 @@ function TradeRow({ row, onClose, isClosing }) {
   let statusColor, statusLabel;
   switch (row._type) {
     case 'open':
-      statusColor = 'bg-forexia-accent/15 text-forexia-accent border-forexia-accent/25';
-      statusLabel = 'OPEN';
+      if (row.is_bot) {
+        statusColor = 'bg-forexia-accent/15 text-forexia-accent border-forexia-accent/25';
+        statusLabel = 'BOT';
+      } else {
+        statusColor = 'bg-forexia-gold/15 text-forexia-gold border-forexia-gold/25';
+        statusLabel = 'MANUAL';
+      }
       break;
     case 'closed':
       statusColor = pnlPos

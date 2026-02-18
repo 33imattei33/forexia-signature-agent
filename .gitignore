@@ -15,6 +15,9 @@ env/
 settings.json
 multi_accounts.json
 
+# Bot position tracking (runtime state)
+.bot_position_ids.json
+
 # Sensitive test files
 tools/test_e8_login.py
 
