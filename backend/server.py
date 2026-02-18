@@ -562,7 +562,8 @@ async def open_manual_trade(request: Request):
 async def close_single_trade(request: Request):
     """
     Close a single open position by ticket ID or position ID.
-    Body: { "ticket": 12345 } or { "id": "W12345" } or both
+    Body: { "ticket": 12345 } or { "id": "W12345" } or both.
+    Prefers the string 'id' field for exact matching with the broker API.
     """
     bridge = orchestrator.bridge
     if not bridge or not bridge.is_connected:
@@ -570,20 +571,21 @@ async def close_single_trade(request: Request):
 
     body = await request.json()
     ticket = body.get("ticket")
-    pos_id = body.get("id")
+    pos_id = body.get("id")  # Original string ID like "W4250023165791583"
 
     if not ticket and not pos_id:
         return {"status": "ERROR", "message": "Ticket ID or position ID required"}
 
-    # Use ticket number (int) for close_trade
-    close_id = int(ticket) if ticket else int("".join(filter(str.isdigit, str(pos_id))))
+    # Prefer string ID for exact broker API matching, fall back to numeric ticket
+    search_key = str(pos_id) if pos_id else str(ticket)
+    logger.info(f"Close request: ticket={ticket}, id={pos_id}, search_key={search_key}")
 
-    result = await bridge.close_trade(close_id)
+    result = await bridge.close_by_id(search_key)
     if result:
         orchestrator._account = await bridge.get_account_state()
-        logger.info(f"Position #{close_id} closed via dashboard")
-        return {"status": "OK", "ticket": close_id}
-    return {"status": "ERROR", "message": f"Failed to close position #{close_id}"}
+        logger.info(f"Position {search_key} closed via dashboard")
+        return {"status": "OK", "id": search_key}
+    return {"status": "ERROR", "message": f"Failed to close position {search_key}"}
 
 
 @app.post("/api/trade/modify")

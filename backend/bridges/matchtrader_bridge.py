@@ -796,8 +796,15 @@ class MatchTraderBridge:
         return False
 
     async def close_trade(self, ticket: int) -> bool:
+        """Close an open position by numeric ticket (backward-compatible)."""
+        return await self.close_by_id(str(ticket))
+
+    async def close_by_id(self, search_key: str) -> bool:
         """
         Close an open position via POST /mtr-api/{uuid}/position/close.
+
+        Accepts any identifier: original ID ("W168933563011635"),
+        numeric ticket ("168933563011635"), or clean string.
 
         Payload:
         {
@@ -811,27 +818,33 @@ class MatchTraderBridge:
             return False
 
         # Find the position to get its details
-        position = await self._find_position(str(ticket))
+        position = await self._find_position(search_key)
         if not position:
-            logger.error(f"Position #{ticket} not found for close")
+            logger.error(f"Position '{search_key}' not found for close")
             return False
 
         close_data = {
             "positionId": position["id"],
             "instrument": position["symbol"],
             "orderSide": position["side"],
-            "volume": str(position["volume"]),  # volume is a string in close endpoint
+            "volume": str(position["volume"]),
         }
+
+        logger.info(
+            f"Closing position: id={position['id']}, "
+            f"instrument={position['symbol']}, side={position['side']}, "
+            f"volume={position['volume']}"
+        )
 
         url = self._mtr_path("position/close")
         result = await self._post(url, close_data)
 
         if result and (result.get("status") or "").upper() == "OK":
-            logger.info(f"MatchTrader position #{ticket} CLOSED")
+            logger.info(f"MatchTrader position {position['id']} CLOSED")
             return True
 
         error_msg = (result or {}).get("errorMessage", "Unknown error")
-        logger.error(f"MatchTrader close failed for #{ticket}: {error_msg}")
+        logger.error(f"MatchTrader close failed for {position['id']}: {error_msg}")
         return False
 
     async def close_all_trades(self, symbol: Optional[str] = None) -> int:

@@ -2,6 +2,7 @@
  * ═══════════════════════════════════════════════════════════════════
  *  FOREXIA — TRANSACTION HISTORY PANEL
  *  Full trade history: open positions, closed trades, agent signals
+ *  Close buttons for every open position (manual & bot-placed)
  * ═══════════════════════════════════════════════════════════════════
  */
 import React, { useState, useEffect, useCallback } from 'react';
@@ -31,6 +32,8 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
   const [history, setHistory] = useState({ open: [], closed: [], agent_trades: [] });
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(false);
+  const [closingIds, setClosingIds] = useState(new Set());   // IDs currently being closed
+  const [closingAll, setClosingAll] = useState(false);        // "Close All" in progress
 
   const fetchHistory = useCallback(async () => {
     try {
@@ -47,6 +50,62 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
     const id = setInterval(fetchHistory, 5000);
     return () => clearInterval(id);
   }, [fetchHistory]);
+
+  /* ── Close a single position ── */
+  const handleClose = useCallback(async (row) => {
+    const key = row.id || String(row.ticket);
+    if (!key || closingIds.has(key)) return;
+
+    setClosingIds((prev) => new Set(prev).add(key));
+    try {
+      const body = {};
+      if (row.id) body.id = row.id;
+      if (row.ticket) body.ticket = row.ticket;
+
+      const res = await fetch('/api/trade/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (data.status === 'OK') {
+        // Immediately refresh
+        await fetchHistory();
+      } else {
+        console.error('Close failed:', data.message);
+      }
+    } catch (err) {
+      console.error('Close error:', err);
+    } finally {
+      setClosingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  }, [closingIds, fetchHistory]);
+
+  /* ── Close ALL open positions ── */
+  const handleCloseAll = useCallback(async () => {
+    if (closingAll) return;
+    setClosingAll(true);
+    try {
+      const res = await fetch('/api/close-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json();
+      if (data.status === 'OK' || data.closed > 0) {
+        await fetchHistory();
+      } else {
+        console.error('Close-all failed:', data);
+      }
+    } catch (err) {
+      console.error('Close-all error:', err);
+    } finally {
+      setClosingAll(false);
+    }
+  }, [closingAll, fetchHistory]);
 
   // Combine all items
   const openRows = (history.open || []).map((t) => ({ ...t, _type: 'open' }));
@@ -108,8 +167,28 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
           </div>
         </div>
 
-        {/* Summary pills */}
+        {/* Summary pills + Close All */}
         <div className="flex items-center gap-2">
+          {openRows.length > 0 && (
+            <button
+              onClick={handleCloseAll}
+              disabled={closingAll}
+              className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider border transition-all ${
+                closingAll
+                  ? 'bg-gray-800 text-gray-600 border-gray-700 cursor-wait'
+                  : 'bg-forexia-red/10 text-forexia-red border-forexia-red/30 hover:bg-forexia-red/20 hover:border-forexia-red/50 cursor-pointer'
+              }`}
+            >
+              {closingAll ? (
+                <span className="flex items-center gap-1">
+                  <span className="w-2.5 h-2.5 border border-forexia-red border-t-transparent rounded-full animate-spin" />
+                  Closing…
+                </span>
+              ) : (
+                `Close All (${openRows.length})`
+              )}
+            </button>
+          )}
           {openRows.length > 0 && (
             <div className={`px-2 py-0.5 rounded text-[9px] font-bold font-mono border ${
               totalPnl >= 0
@@ -157,11 +236,17 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
                 <th className="py-1.5 px-2">Exit</th>
                 <th className="py-1.5 px-2 text-right">P&L</th>
                 <th className="py-1.5 px-2">Info</th>
+                <th className="py-1.5 px-2 text-center w-12"></th>
               </tr>
             </thead>
             <tbody>
               {displayRows.map((row, i) => (
-                <TradeRow key={`${row._type}-${row.id || row.ticket || i}`} row={row} />
+                <TradeRow
+                  key={`${row._type}-${row.id || row.ticket || i}`}
+                  row={row}
+                  onClose={handleClose}
+                  isClosing={closingIds.has(row.id || String(row.ticket))}
+                />
               ))}
             </tbody>
           </table>
@@ -190,7 +275,7 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
 }
 
 /* ── Individual row ── */
-function TradeRow({ row }) {
+function TradeRow({ row, onClose, isClosing }) {
   const dec = getPrecision(row.symbol);
   const isBuy = (row.side || '').toUpperCase() === 'BUY';
   const pnl = row.net_profit ?? row.profit ?? 0;
@@ -285,6 +370,39 @@ function TradeRow({ row }) {
         {row._type === 'closed' && row.close_time ? formatTime(row.close_time) : ''}
         {row._type === 'agent' && row.signal_type ? row.signal_type.replace(/_/g, ' ') : ''}
         {row._type === 'signal' && row.signal_type ? row.signal_type.replace(/_/g, ' ') : ''}
+      </td>
+
+      {/* Close button — only for open positions */}
+      <td className="py-1.5 px-2 text-center">
+        {row._type === 'open' ? (
+          <button
+            onClick={() => onClose(row)}
+            disabled={isClosing}
+            title={`Close ${(row.symbol || '').replace('.', '')} ${row.side}`}
+            className={`inline-flex items-center justify-center w-5 h-5 rounded transition-all ${
+              isClosing
+                ? 'bg-gray-800 cursor-wait'
+                : 'bg-forexia-red/10 hover:bg-forexia-red/30 border border-forexia-red/20 hover:border-forexia-red/50 cursor-pointer group'
+            }`}
+          >
+            {isClosing ? (
+              <span className="w-2.5 h-2.5 border border-forexia-red border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className="w-3 h-3 text-forexia-red/70 group-hover:text-forexia-red"
+                viewBox="0 0 20 20"
+                fill="currentColor"
+              >
+                <path
+                  fillRule="evenodd"
+                  d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
+                  clipRule="evenodd"
+                />
+              </svg>
+            )}
+          </button>
+        ) : null}
       </td>
     </tr>
   );
