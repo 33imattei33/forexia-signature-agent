@@ -41,11 +41,18 @@ class RiskConfig:
     lot_per_100_equity: float = 0.01        # Hardcoded: 0.01 lot / $100
     max_risk_percent: float = 2.0           # Max 2% of equity per trade
     max_lot_size: float = 0.10              # ABSOLUTE max lot size per order
-    stop_loss_buffer_pips: float = 3.0      # Pips beyond the hunt wick
-    take_profit_ratio: float = 3.0          # Minimum 1:3 risk-reward
+    stop_loss_buffer_pips: float = 30.0     # Wide SL — room to breathe
+    take_profit_ratio: float = 0.4          # TP = 0.4x SL distance
+    take_profit_pips: float = 12.0          # Fixed TP in pips (overrides ratio when > 0)
     max_concurrent_trades: int = 3          # Max open positions
     max_daily_loss_percent: float = 5.0     # Daily circuit breaker
-    max_spread_pips: float = 3.0            # Reject entries with wild spreads
+    max_spread_pips: float = 2.0            # Reject entries with wide spreads
+    # ── Position Manager (Breakeven + Trailing) ──
+    breakeven_trigger_pips: float = 6.0     # Move SL to entry after X pips profit
+    breakeven_lock_pips: float = 1.0        # Lock X pips above entry at breakeven
+    trailing_start_pips: float = 12.0       # Start trailing after X pips profit
+    trailing_step_pips: float = 5.0         # Trail X pips behind price
+    stale_trade_minutes: int = 60           # Close negative trades after X minutes (0=disabled)
 
 
 # ─────────────────────────────────────────────────────────────────────

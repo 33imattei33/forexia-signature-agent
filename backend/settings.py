@@ -47,11 +47,18 @@ class RiskSettings(BaseModel):
     lot_per_100_equity: float = Field(default=0.01, description="Lots per $100 equity")
     max_risk_percent: float = Field(default=2.0, description="Max risk % per trade")
     max_lot_size: float = Field(default=0.10, description="Absolute max lot size per order")
-    stop_loss_buffer_pips: float = Field(default=3.0, description="Pips beyond stop hunt wick")
-    take_profit_ratio: float = Field(default=3.0, description="Minimum R:R ratio")
+    stop_loss_buffer_pips: float = Field(default=30.0, description="Wide SL — pips beyond stop hunt wick")
+    take_profit_ratio: float = Field(default=0.4, description="TP as ratio of SL distance")
+    take_profit_pips: float = Field(default=12.0, description="Fixed TP in pips (overrides ratio when > 0)")
     max_concurrent_trades: int = Field(default=3, description="Max open positions")
     max_daily_loss_percent: float = Field(default=5.0, description="Daily loss circuit breaker %")
-    max_spread_pips: float = Field(default=3.0, description="Max spread to accept")
+    max_spread_pips: float = Field(default=2.0, description="Max spread to accept")
+    # Position Manager — Breakeven + Trailing Stop
+    breakeven_trigger_pips: float = Field(default=6.0, description="Move SL to entry after X pips profit")
+    breakeven_lock_pips: float = Field(default=1.0, description="Lock X pips above entry at breakeven")
+    trailing_start_pips: float = Field(default=12.0, description="Start trailing SL after X pips profit")
+    trailing_step_pips: float = Field(default=5.0, description="Trail X pips behind current price")
+    stale_trade_minutes: int = Field(default=60, description="Close negative trades after X minutes (0=disabled)")
 
 
 class AgentSettings(BaseModel):

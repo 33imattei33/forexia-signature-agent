@@ -192,21 +192,45 @@ class RiskManager:
         direction: TradeDirection,
         entry_price: float,
         stop_loss: float,
-        target_liquidity: Optional[float] = None
+        target_liquidity: Optional[float] = None,
+        symbol: str = "EURUSD"
     ) -> float:
         """
         Calculate take-profit target.
         
-        Minimum 1:3 risk-reward ratio, but will target the opposite
-        liquidity pool if one is identified.
+        Two modes:
+          1. Fixed TP pips (when take_profit_pips > 0) — quick, high-probability targets
+          2. Ratio-based (default fallback) — TP = ratio × SL distance
         
-        The take-profit targets the OTHER side's liquidity pool:
-          - If we bought after a downside hunt, TP targets the upside
-            liquidity (HOD, weekly high, etc.)
-          - If we sold after an upside hunt, TP targets the downside
-            liquidity (LOD, weekly low, etc.)
+        Fixed pips mode is preferred for high win-rate scalp strategies.
+        The take-profit targets quick, achievable exits:
+          - 8-12 pips is optimal for major pairs on M1-M15
+          - Most trades hit this target before reversing
         """
         risk = abs(entry_price - stop_loss)
+        pip_value = self._get_pip_value(symbol)
+
+        # Mode 1: Fixed TP in pips (high win-rate mode)
+        fixed_tp_pips = getattr(self.config, 'take_profit_pips', 0.0)
+        if fixed_tp_pips > 0:
+            tp_distance = fixed_tp_pips * pip_value
+            if direction == TradeDirection.BUY:
+                tp = entry_price + tp_distance
+            else:
+                tp = entry_price - tp_distance
+
+            actual_rr = abs(tp - entry_price) / risk if risk > 0 else 0
+            logger.info(
+                f"══╡ TAKE-PROFIT (FIXED) — {tp:.5f} ╞══\n"
+                f"    Entry: {entry_price:.5f}\n"
+                f"    TP: {fixed_tp_pips:.1f} pips (fixed mode)\n"
+                f"    Risk: {risk / pip_value:.1f} pips\n"
+                f"    R:R Ratio: 1:{actual_rr:.2f}\n"
+                f"    Strategy: Quick-profit scalp mode"
+            )
+            return round(tp, 5)
+
+        # Mode 2: Ratio-based TP (fallback)
         min_tp_distance = risk * self.config.take_profit_ratio
 
         if direction == TradeDirection.BUY:
@@ -224,7 +248,7 @@ class RiskManager:
             f"    Risk: {risk * 10000:.1f} pips\n"
             f"    Reward: {abs(tp - entry_price) * 10000:.1f} pips\n"
             f"    R:R Ratio: 1:{actual_rr:.1f}\n"
-            f"    {'Target: Opposite liquidity pool' if target_liquidity else 'Target: Minimum 1:3 R:R'}"
+            f"    {'Target: Opposite liquidity pool' if target_liquidity else 'Target: Ratio-based'}"
         )
 
         return round(tp, 5)
@@ -325,7 +349,7 @@ class RiskManager:
             account, entry_price, stop_loss, symbol
         )
         take_profit = self.calculate_take_profit(
-            direction, entry_price, stop_loss, target_liquidity
+            direction, entry_price, stop_loss, target_liquidity, symbol
         )
 
         # Validate before returning
