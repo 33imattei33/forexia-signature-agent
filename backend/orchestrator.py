@@ -50,6 +50,7 @@ from backend.bridges.mt5_bridge import MT5Bridge
 from backend.bridges.remote_mt5_bridge import RemoteMT5Bridge
 from backend.bridges.matchtrader_bridge import MatchTraderBridge
 from backend.scrapers.news_catalyst import NewsCatalystEngine
+from backend.engines.gemini_advisor import GeminiAdvisor
 from backend.settings import SETTINGS, ForexiaSettings
 
 logger = logging.getLogger("forexia.orchestrator")
@@ -83,6 +84,7 @@ class ForexiaOrchestrator:
         self.remote_mt5 = RemoteMT5Bridge()
         self.matchtrader = MatchTraderBridge()
         self.news = NewsCatalystEngine()
+        self.gemini = GeminiAdvisor()
         self._bridge = None  # Active bridge (mt4, mt5, remote_mt5, or matchtrader)
 
         # ── State ──
@@ -94,6 +96,7 @@ class ForexiaOrchestrator:
         self._news_refresh_task: Optional[asyncio.Task] = None
         self._auto_scan_task: Optional[asyncio.Task] = None
         self._position_mgr_task: Optional[asyncio.Task] = None
+        self._gemini_scan_task: Optional[asyncio.Task] = None
         self._settings = SETTINGS
 
         # ── Win-Rate Protection ──
@@ -296,6 +299,16 @@ class ForexiaOrchestrator:
 
         self._running = True
 
+        # Start Gemini AI Advisor if API key is configured
+        gemini_key = getattr(self._settings.agent, 'gemini_api_key', '')
+        gemini_model = getattr(self._settings.agent, 'gemini_model', '')
+        if gemini_key:
+            self.gemini.configure(gemini_key, gemini_model)
+            await self.gemini.start_scan_loop(self)
+            logger.info("Gemini AI Advisor: STARTED")
+        else:
+            logger.info("Gemini AI Advisor: DISABLED (no API key — add via Settings)")
+
         # Start auto-scan loop if auto_trade is enabled
         if self._settings.agent.auto_trade:
             self._start_auto_scan()
@@ -339,6 +352,10 @@ class ForexiaOrchestrator:
             pass
         try:
             await self.matchtrader.disconnect()
+        except Exception:
+            pass
+        try:
+            await self.gemini.cleanup()
         except Exception:
             pass
         logger.info("═══ FOREXIA SIGNATURE AGENT — SHUTDOWN ═══")
@@ -1046,10 +1063,33 @@ class ForexiaOrchestrator:
         """
         Execute a ForexiaSignal via the active broker bridge.
         This is the final step — pulling the trigger.
+        
+        If Gemini AI is enabled, asks for a signal review (advisory only —
+        does NOT block execution, just logs the AI's opinion).
         """
         if not self.bridge.is_connected:
             logger.error("Cannot execute — broker bridge not connected")
             return None
+
+        # ── Gemini AI Signal Review (advisory, non-blocking) ──
+        if self.gemini.is_enabled:
+            try:
+                session_phase = self.dialectic.get_current_phase(datetime.utcnow()).value
+                weekly_act = self.weekly.get_current_act(datetime.utcnow()).value
+                await self.gemini.review_signal(
+                    symbol=signal.symbol,
+                    direction=signal.direction.value,
+                    signal_type=signal.signal_type.value,
+                    confidence=signal.confidence,
+                    entry_price=signal.entry_price,
+                    stop_loss=signal.stop_loss,
+                    take_profit=signal.take_profit,
+                    lot_size=signal.lot_size,
+                    session_phase=session_phase,
+                    weekly_act=weekly_act,
+                )
+            except Exception as e:
+                logger.debug(f"Gemini signal review skipped: {e}")
 
         # Fire the order (risk was already validated in _build_signal)
         ticket = await self.bridge.execute_market_order(

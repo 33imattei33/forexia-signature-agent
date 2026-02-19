@@ -903,6 +903,99 @@ async def get_bot_status():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  GEMINI AI ADVISOR — Market Intelligence
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.get("/api/ai/status")
+async def get_ai_status():
+    """Get the Gemini AI advisor status and all cached data."""
+    return orchestrator.gemini.get_full_state()
+
+
+@app.get("/api/ai/analysis/{symbol}")
+async def get_ai_analysis(symbol: str):
+    """Get the latest AI analysis for a specific pair."""
+    analysis = orchestrator.gemini.get_analysis(symbol.upper())
+    if analysis:
+        return {"status": "OK", "analysis": analysis}
+    return {"status": "PENDING", "message": f"No AI analysis available for {symbol.upper()} yet"}
+
+
+@app.post("/api/ai/analyze/{symbol}")
+async def trigger_ai_analysis(symbol: str):
+    """Manually trigger an AI analysis for a specific pair."""
+    if not orchestrator.gemini.is_enabled:
+        return {"status": "ERROR", "message": "Gemini AI not configured. Add your API key in Settings."}
+
+    bridge = orchestrator.bridge
+    if not bridge or not bridge.is_connected:
+        return {"status": "ERROR", "message": "Broker not connected"}
+
+    try:
+        candles = await bridge.get_candles(symbol.upper(), "M1", 100)
+        if not candles or len(candles) < 20:
+            return {"status": "ERROR", "message": f"Insufficient candle data for {symbol.upper()}"}
+
+        spread = 0
+        try:
+            price_info = await bridge.get_current_price(symbol.upper())
+            if price_info:
+                spread = price_info.get("spread", 0)
+        except Exception:
+            pass
+
+        session_phase = orchestrator.dialectic.get_current_phase(
+            datetime.utcnow()
+        ).value
+        weekly_act = orchestrator.weekly.get_current_act(
+            datetime.utcnow()
+        ).value
+
+        positions = []
+        try:
+            positions = await bridge.get_open_positions()
+        except Exception:
+            pass
+
+        analysis = await orchestrator.gemini.analyze_pair(
+            symbol=symbol.upper(),
+            candles=candles,
+            session_phase=session_phase,
+            weekly_act=weekly_act,
+            account_balance=orchestrator._account.balance,
+            account_equity=orchestrator._account.equity,
+            open_positions=positions,
+            spread=spread,
+        )
+
+        if analysis:
+            return {"status": "OK", "analysis": analysis.to_dict()}
+        return {"status": "ERROR", "message": "Gemini returned no analysis"}
+
+    except Exception as e:
+        logger.error(f"AI analysis trigger failed: {e}")
+        return {"status": "ERROR", "message": str(e)}
+
+
+@app.get("/api/ai/overview")
+async def get_ai_overview():
+    """Get the multi-pair market overview from Gemini."""
+    overview = orchestrator.gemini.get_overview()
+    if overview:
+        return {"status": "OK", "overview": overview}
+    return {"status": "PENDING", "message": "No market overview available yet"}
+
+
+@app.get("/api/ai/reviews")
+async def get_ai_signal_reviews():
+    """Get recent AI signal reviews."""
+    return {
+        "status": "OK",
+        "reviews": orchestrator.gemini.get_signal_reviews(limit=20),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  SETTINGS API — Configuration Management
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -938,11 +1031,26 @@ async def update_settings(request: Request):
 
     # Update agent settings
     if "agent" in body:
-        current.agent = AgentSettings(**{**current.agent.model_dump(), **body["agent"]})
+        agent_data = body["agent"]
+        # Don't overwrite Gemini API key with the masked value
+        if agent_data.get("gemini_api_key") in ("••••••••", "", None):
+            agent_data["gemini_api_key"] = current.agent.gemini_api_key
+        current.agent = AgentSettings(**{**current.agent.model_dump(), **agent_data})
 
     # Save and apply
     current.save()
     orchestrator.apply_settings(current)
+
+    # Reconfigure Gemini if API key changed
+    gemini_key = current.agent.gemini_api_key
+    if gemini_key and gemini_key != "••••••••":
+        orchestrator.gemini.configure(gemini_key, current.agent.gemini_model)
+        if not orchestrator.gemini._scan_task or orchestrator.gemini._scan_task.done():
+            await orchestrator.gemini.start_scan_loop(orchestrator)
+            logger.info("Gemini AI Advisor: reconfigured and scan loop started")
+    elif not gemini_key:
+        await orchestrator.gemini.stop_scan_loop()
+        logger.info("Gemini AI Advisor: disabled (API key removed)")
 
     logger.info("Settings updated and applied")
     return {"status": "OK", "message": "Settings saved", "settings": current.to_safe_dict()}

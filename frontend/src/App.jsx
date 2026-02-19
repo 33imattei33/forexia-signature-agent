@@ -37,6 +37,7 @@ import TradingPanel from './components/TradingPanel';
 import OpenPositions from './components/OpenPositions';
 import AutoTradeBot from './components/AutoTradeBot';
 import LiveChart from './components/LiveChart';
+import GeminiAdvisorPanel from './components/GeminiAdvisorPanel';
 
 /* ───── Status indicator dot ───── */
 function StatusDot({ ok }) {
@@ -234,7 +235,7 @@ export default function App() {
         </div>
 
         {/* ─── ROW 4: Transaction History · News & Liquidity ─── */}
-        <div className="grid grid-cols-12 gap-4">
+        <div className="grid grid-cols-12 gap-4 mb-4">
           <div className="col-span-7">
             <TransactionHistory brokerConnected={brokerConnected} signals={signals} />
           </div>
@@ -242,6 +243,11 @@ export default function App() {
             <NewsCatalystPanel catalysts={news} traumaActive={dashboard?.trauma_filter_active} />
             <LiquidityPanel zones={liquidity} />
           </div>
+        </div>
+
+        {/* ─── ROW 5: Gemini AI Advisor ─── */}
+        <div className="mb-4">
+          <GeminiAdvisorPanel brokerConnected={brokerConnected} />
         </div>
       </main>
 

@@ -820,6 +820,36 @@ export default function SettingsPanel({ isOpen, onClose }) {
                   />
                 </div>
               </div>
+
+              {/* ─── Gemini AI Advisor ─── */}
+              <div className="bg-forexia-panel rounded-lg border border-gray-800/60 overflow-hidden">
+                <div className="px-4 py-2.5 bg-gray-900/60 border-b border-gray-800/40 flex items-center gap-2">
+                  <span className="text-sm">🤖</span>
+                  <h3 className="text-[10px] font-bold text-white uppercase tracking-wider">Gemini AI Advisor</h3>
+                  <span className="text-[8px] text-gray-500">(Advisory Only — does not execute trades)</span>
+                </div>
+                <div className="p-4 space-y-4">
+                  <Field
+                    label="Gemini API Key"
+                    value={settings.agent.gemini_api_key || ''}
+                    onChange={(v) => updateAgent('gemini_api_key', v)}
+                    type="password"
+                    description={
+                      <>
+                        Google AI Studio API key. Get one free at{' '}
+                        <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer"
+                          className="text-forexia-accent hover:underline">aistudio.google.com/apikey</a>
+                      </>
+                    }
+                  />
+                  <Field
+                    label="Gemini Model"
+                    value={settings.agent.gemini_model || 'gemini-2.0-flash'}
+                    onChange={(v) => updateAgent('gemini_model', v)}
+                    description="gemini-2.0-flash (fast, free) or gemini-2.5-pro (best quality)"
+                  />
+                </div>
+              </div>
             </div>
 
             {/* Save Button */}
