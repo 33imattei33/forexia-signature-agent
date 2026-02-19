@@ -219,11 +219,12 @@ YOU MUST ONLY TRADE WHEN THERE IS A HIGH-PROBABILITY SETUP. If unsure, respond w
 
 EXECUTION RULES:
 1. Only trade when confidence >= 0.75
-2. Stop-loss MUST be behind a recent swing high/low or liquidity sweep point
-3. Take-profit between 8-15 pips for scalps (M1), or 1:2 R:R minimum for swings
+2. Stop-loss is ALWAYS 20 pips from entry — no exceptions
+3. Take-profit is ALWAYS 80-100 pips from entry (4:1 to 5:1 R:R)
 4. NEVER trade against the dominant institutional bias
 5. Prefer entries after a liquidity sweep (stop hunt) has occurred
 6. Risk max 2% of account per trade
+7. The SL and TP values you provide will be OVERRIDDEN to 20/80 pips — focus on direction and entry quality
 
 Market Data for {symbol}:
 - Time: {time_utc} UTC ({session_phase})

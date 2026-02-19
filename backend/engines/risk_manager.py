@@ -136,49 +136,50 @@ class RiskManager:
         self,
         direction: TradeDirection,
         stop_hunt_extreme: float,
-        symbol: str = "EURUSD"
+        symbol: str = "EURUSD",
+        entry_price: float = 0.0,
     ) -> float:
         """
-        Calculate stop-loss placement — just beyond the stop hunt wick.
+        Calculate stop-loss placement — FIXED 20 pips from entry.
         
-        The stop hunt extreme is the tip of the exhaustion wick.
-        Our SL goes BEYOND this point by the buffer amount.
-        
-        Why this works:
-          - Smart Money just swept that level — they WON'T sweep it again
-            immediately. It's "used up" liquidity.
-          - Any move beyond the hunt extreme would require a NEW round
-            of manipulation, which is very unlikely in the same session.
-          - We're using the swept zone as a protective shield.
+        Strategy mandate: All trades get exactly 20 pip stop-loss.
+        This provides tight risk control while allowing room for noise.
         
         Args:
             direction: BUY or SELL
-            stop_hunt_extreme: The wick extreme from the stop hunt
+            stop_hunt_extreme: The wick extreme (legacy, used as fallback)
             symbol: Used to determine pip value
+            entry_price: Current entry price for fixed-pip SL calculation
         
         Returns: stop-loss price
         """
-        buffer = self.config.stop_loss_buffer_pips * self._get_pip_value(symbol)
+        sl_pips = self.config.stop_loss_buffer_pips  # 20 pips
+        pip_val = self._get_pip_value(symbol)
+        sl_distance = sl_pips * pip_val
 
-        if direction == TradeDirection.BUY:
-            # We're buying after a downside stop hunt
-            # SL goes BELOW the hunt wick extreme
-            sl = stop_hunt_extreme - buffer
+        if entry_price > 0:
+            # FIXED SL: Exactly sl_pips (20) from entry
+            if direction == TradeDirection.BUY:
+                sl = entry_price - sl_distance
+            else:
+                sl = entry_price + sl_distance
             logger.info(
-                f"══╡ STOP-LOSS (BUY) — {sl:.5f} ╞══\n"
-                f"    Hunt extreme (low): {stop_hunt_extreme:.5f}\n"
-                f"    Buffer: {self.config.stop_loss_buffer_pips} pips\n"
-                f"    SL placed BELOW swept liquidity — using it as shield"
+                f"══╡ STOP-LOSS ({direction.value}) — {sl:.5f} ╞══\n"
+                f"    Entry: {entry_price:.5f}\n"
+                f"    SL: FIXED {sl_pips:.0f} pips from entry\n"
+                f"    Strategy: Tight 20-pip risk control"
             )
         else:
-            # We're selling after an upside stop hunt
-            # SL goes ABOVE the hunt wick extreme
-            sl = stop_hunt_extreme + buffer
+            # Fallback: buffer from stop hunt extreme
+            if direction == TradeDirection.BUY:
+                sl = stop_hunt_extreme - sl_distance
+            else:
+                sl = stop_hunt_extreme + sl_distance
             logger.info(
-                f"══╡ STOP-LOSS (SELL) — {sl:.5f} ╞══\n"
-                f"    Hunt extreme (high): {stop_hunt_extreme:.5f}\n"
-                f"    Buffer: {self.config.stop_loss_buffer_pips} pips\n"
-                f"    SL placed ABOVE swept liquidity — using it as shield"
+                f"══╡ STOP-LOSS ({direction.value}) — {sl:.5f} ╞══\n"
+                f"    Hunt extreme: {stop_hunt_extreme:.5f}\n"
+                f"    Buffer: {sl_pips:.0f} pips\n"
+                f"    Fallback mode (no entry price)"
             )
 
         return round(sl, 5)
@@ -196,41 +197,38 @@ class RiskManager:
         symbol: str = "EURUSD"
     ) -> float:
         """
-        Calculate take-profit target.
+        Calculate take-profit target — FIXED 80 pips from entry.
         
-        Two modes:
-          1. Fixed TP pips (when take_profit_pips > 0) — quick, high-probability targets
-          2. Ratio-based (default fallback) — TP = ratio × SL distance
-        
-        Fixed pips mode is preferred for high win-rate scalp strategies.
-        The take-profit targets quick, achievable exits:
-          - 8-12 pips is optimal for major pairs on M1-M15
-          - Most trades hit this target before reversing
+        Strategy mandate: All trades target 80 pips TP (4:1 R:R with 20 pip SL).
+        This gives excellent risk-to-reward while being achievable on major pairs.
         """
         risk = abs(entry_price - stop_loss)
         pip_value = self._get_pip_value(symbol)
 
-        # Mode 1: Fixed TP in pips (high win-rate mode)
-        fixed_tp_pips = getattr(self.config, 'take_profit_pips', 0.0)
-        if fixed_tp_pips > 0:
-            tp_distance = fixed_tp_pips * pip_value
-            if direction == TradeDirection.BUY:
-                tp = entry_price + tp_distance
-            else:
-                tp = entry_price - tp_distance
+        # FIXED TP: Always use take_profit_pips (80 pips)
+        fixed_tp_pips = getattr(self.config, 'take_profit_pips', 80.0)
+        if fixed_tp_pips <= 0:
+            fixed_tp_pips = 80.0  # Enforce minimum
 
-            actual_rr = abs(tp - entry_price) / risk if risk > 0 else 0
-            logger.info(
-                f"══╡ TAKE-PROFIT (FIXED) — {tp:.5f} ╞══\n"
-                f"    Entry: {entry_price:.5f}\n"
-                f"    TP: {fixed_tp_pips:.1f} pips (fixed mode)\n"
-                f"    Risk: {risk / pip_value:.1f} pips\n"
-                f"    R:R Ratio: 1:{actual_rr:.2f}\n"
-                f"    Strategy: Quick-profit scalp mode"
-            )
-            return round(tp, 5)
+        tp_distance = fixed_tp_pips * pip_value
+        if direction == TradeDirection.BUY:
+            tp = entry_price + tp_distance
+        else:
+            tp = entry_price - tp_distance
 
-        # Mode 2: Ratio-based TP (fallback)
+        actual_rr = abs(tp - entry_price) / risk if risk > 0 else 0
+        logger.info(
+            f"══╡ TAKE-PROFIT (FIXED) — {tp:.5f} ╞══\n"
+            f"    Entry: {entry_price:.5f}\n"
+            f"    TP: {fixed_tp_pips:.0f} pips (fixed mode)\n"
+            f"    Risk: {risk / pip_value:.1f} pips\n"
+            f"    R:R Ratio: 1:{actual_rr:.2f}\n"
+            f"    Strategy: Fixed 20 SL / 80 TP — 4:1 R:R"
+        )
+        return round(tp, 5)
+
+        # Ratio-based fallback no longer used — all trades use fixed TP above
+        # This code is unreachable but kept for reference
         min_tp_distance = risk * self.config.take_profit_ratio
 
         if direction == TradeDirection.BUY:
@@ -344,7 +342,7 @@ class RiskManager:
             or None if rejected.
         """
         # SL must be calculated FIRST — lot sizing depends on SL distance
-        stop_loss = self.calculate_stop_loss(direction, stop_hunt_extreme, symbol)
+        stop_loss = self.calculate_stop_loss(direction, stop_hunt_extreme, symbol, entry_price=entry_price)
         lot_size = self.calculate_lot_size(
             account, entry_price, stop_loss, symbol
         )

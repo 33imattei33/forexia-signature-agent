@@ -1200,10 +1200,19 @@ class ForexiaOrchestrator:
             logger.warning(f"[AI TRADE] Risk validation FAILED for {symbol}")
             return False
 
-        # Use AI's SL/TP but risk manager's lot size
+        # Override AI's SL/TP with fixed strategy: 20 pip SL, 80 pip TP
         lot_size = risk_pkg["lot_size"]
-        stop_loss = ai_signal.stop_loss
-        take_profit = ai_signal.take_profit
+        pip_val = 0.01 if "JPY" in symbol else 0.0001
+        sl_distance = 20.0 * pip_val   # Fixed 20 pips
+        tp_distance = 80.0 * pip_val   # Fixed 80 pips
+        if direction == TradeDirection.BUY:
+            stop_loss = ai_signal.entry_price - sl_distance
+            take_profit = ai_signal.entry_price + tp_distance
+        else:
+            stop_loss = ai_signal.entry_price + sl_distance
+            take_profit = ai_signal.entry_price - tp_distance
+        stop_loss = round(stop_loss, 5)
+        take_profit = round(take_profit, 5)
 
         # Build a ForexiaSignal for the existing execution pipeline
         signal = ForexiaSignal(
