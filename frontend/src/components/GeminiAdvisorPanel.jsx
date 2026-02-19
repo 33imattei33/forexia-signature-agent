@@ -165,7 +165,7 @@ export default function GeminiAdvisorPanel({ brokerConnected }) {
   const [aiState, setAiState] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(null); // symbol being refreshed
-  const [activeTab, setActiveTab] = useState('analyses'); // analyses | overview | reviews
+  const [activeTab, setActiveTab] = useState('analyses'); // analyses | overview | reviews | ai_trades
 
   /* ───── Fetch AI state ───── */
   const fetchAI = useCallback(async () => {
@@ -206,7 +206,9 @@ export default function GeminiAdvisorPanel({ brokerConnected }) {
   const analyses = aiState?.analyses || {};
   const overview = aiState?.overview || null;
   const reviews = aiState?.signal_reviews || [];
+  const aiTrades = aiState?.ai_trade_signals || [];
   const isEnabled = status.enabled;
+  const exhaustedModels = status.exhausted_models || [];
 
   /* ───── Not configured state ───── */
   if (!isEnabled && !loading) {
@@ -260,6 +262,7 @@ export default function GeminiAdvisorPanel({ brokerConnected }) {
       <div className="flex gap-1 mb-3 border-b border-gray-800/40 pb-2">
         {[
           { key: 'analyses', label: 'PAIR ANALYSIS', count: Object.keys(analyses).length },
+          { key: 'ai_trades', label: '🤖 AI TRADES', count: aiTrades.length },
           { key: 'overview', label: 'MARKET OVERVIEW' },
           { key: 'reviews', label: 'SIGNAL REVIEWS', count: reviews.length },
         ].map((tab) => (
@@ -394,6 +397,87 @@ export default function GeminiAdvisorPanel({ brokerConnected }) {
           ) : (
             reviews.slice().reverse().map((r, i) => (
               <SignalReviewCard key={i} review={r} />
+            ))
+          )}
+        </div>
+      )}
+
+      {/* ───── TAB: AI Trades ───── */}
+      {activeTab === 'ai_trades' && (
+        <div className="space-y-2 max-h-[500px] overflow-y-auto pr-1 scrollbar-thin">
+          {/* Exhausted models banner */}
+          {exhaustedModels.length > 0 && (
+            <div className="bg-amber-500/10 border border-amber-500/20 rounded p-2 mb-2">
+              <p className="text-[9px] text-amber-400">
+                ⚠️ Rate-limited models: {exhaustedModels.join(', ')} — using fallback chain
+              </p>
+            </div>
+          )}
+
+          {aiTrades.length === 0 ? (
+            <div className="text-center py-6">
+              <div className="text-lg mb-1">🤖</div>
+              <p className="text-[10px] text-gray-500">No AI trade signals yet</p>
+              <p className="text-[9px] text-gray-600">AI will generate trade signals during scan cycles when high-confidence setups are found</p>
+              <p className="text-[9px] text-gray-700 mt-2">
+                AI Trades Generated: {status.ai_trades_generated || 0}
+              </p>
+            </div>
+          ) : (
+            aiTrades.slice().reverse().map((trade, i) => (
+              <div key={i} className="bg-gray-900/50 rounded border border-gray-800/60 p-3">
+                {/* Header */}
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-white">{trade.symbol}</span>
+                    <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold ${
+                      trade.action === 'BUY'
+                        ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/25'
+                        : 'bg-red-500/15 text-red-400 border border-red-500/25'
+                    }`}>
+                      {trade.action}
+                    </span>
+                    <ConfidenceBar value={trade.confidence} label="Conf" />
+                  </div>
+                  <span className="text-[8px] text-gray-600">
+                    {trade.timestamp ? new Date(trade.timestamp).toLocaleTimeString() : ''}
+                  </span>
+                </div>
+
+                {/* Price levels */}
+                <div className="grid grid-cols-3 gap-2 mb-2">
+                  <div className="bg-gray-800/40 rounded p-1.5">
+                    <span className="text-[8px] text-gray-600 uppercase">Entry</span>
+                    <p className="text-[10px] text-white font-mono">{trade.entry_price?.toFixed(5)}</p>
+                  </div>
+                  <div className="bg-gray-800/40 rounded p-1.5">
+                    <span className="text-[8px] text-red-400 uppercase">SL</span>
+                    <p className="text-[10px] text-red-400 font-mono">{trade.stop_loss?.toFixed(5)}</p>
+                  </div>
+                  <div className="bg-gray-800/40 rounded p-1.5">
+                    <span className="text-[8px] text-emerald-400 uppercase">TP</span>
+                    <p className="text-[10px] text-emerald-400 font-mono">{trade.take_profit?.toFixed(5)}</p>
+                  </div>
+                </div>
+
+                {/* Risk/Reward */}
+                <div className="flex gap-3 mb-2">
+                  <span className="text-[9px] text-gray-500">
+                    Risk: <span className="text-red-400">{trade.risk_pips?.toFixed(1)}p</span>
+                  </span>
+                  <span className="text-[9px] text-gray-500">
+                    Reward: <span className="text-emerald-400">{trade.reward_pips?.toFixed(1)}p</span>
+                  </span>
+                  <span className="text-[9px] text-gray-500">
+                    R:R <span className="text-forexia-accent">
+                      {trade.risk_pips > 0 ? (trade.reward_pips / trade.risk_pips).toFixed(1) : '—'}:1
+                    </span>
+                  </span>
+                </div>
+
+                {/* Reasoning */}
+                <p className="text-[9px] text-gray-400 leading-relaxed">{trade.reasoning}</p>
+              </div>
             ))
           )}
         </div>

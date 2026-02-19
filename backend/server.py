@@ -995,6 +995,110 @@ async def get_ai_signal_reviews():
     }
 
 
+@app.get("/api/ai/trades")
+async def get_ai_trade_signals():
+    """Get recent AI-generated trade signals."""
+    return {
+        "status": "OK",
+        "trades": orchestrator.gemini.get_ai_trade_signals(limit=20),
+    }
+
+
+@app.post("/api/ai/trade/{symbol}")
+async def trigger_ai_trade(symbol: str):
+    """Manually trigger AI trade analysis + execution for a specific pair."""
+    if not orchestrator.gemini.is_enabled:
+        return {"status": "ERROR", "message": "Gemini AI not configured. Add your API key in Settings."}
+
+    if not orchestrator.settings.agent.auto_trade:
+        return {"status": "ERROR", "message": "Auto-trade is OFF. Enable it first."}
+
+    bridge = orchestrator.bridge
+    if not bridge or not bridge.is_connected:
+        return {"status": "ERROR", "message": "Broker not connected"}
+
+    try:
+        symbol = symbol.upper()
+        candles = await bridge.get_candles(symbol, "M1", 100)
+        if not candles or len(candles) < 20:
+            return {"status": "ERROR", "message": f"Insufficient candle data for {symbol}"}
+
+        # First ensure we have an analysis
+        spread = 0
+        bid = 0
+        ask = 0
+        try:
+            price_info = await bridge.get_current_price(symbol)
+            if price_info:
+                spread = price_info.get("spread", 0)
+                bid = price_info.get("bid", 0)
+                ask = price_info.get("ask", 0)
+        except Exception:
+            pass
+
+        session_phase = orchestrator.dialectic.get_current_phase(
+            datetime.utcnow()
+        ).value
+        weekly_act = orchestrator.weekly.get_current_act(
+            datetime.utcnow()
+        ).value
+
+        positions = []
+        try:
+            positions = await bridge.get_open_positions()
+        except Exception:
+            pass
+
+        # Step 1: Analyze
+        analysis = await orchestrator.gemini.analyze_pair(
+            symbol=symbol,
+            candles=candles,
+            session_phase=session_phase,
+            weekly_act=weekly_act,
+            account_balance=orchestrator._account.balance,
+            account_equity=orchestrator._account.equity,
+            open_positions=positions,
+            spread=spread,
+        )
+
+        if not analysis:
+            return {"status": "ERROR", "message": "AI analysis failed"}
+
+        # Step 2: Generate trade signal
+        trade_signal = await orchestrator.gemini.generate_trade_signal(
+            symbol=symbol,
+            candles=candles,
+            session_phase=session_phase,
+            weekly_act=weekly_act,
+            account_balance=orchestrator._account.balance,
+            account_equity=orchestrator._account.equity,
+            open_positions=positions,
+            spread=spread,
+            bid=bid,
+            ask=ask,
+        )
+
+        if not trade_signal:
+            return {
+                "status": "OK",
+                "message": f"AI analyzed {symbol} but decided to PASS (no high-confidence setup)",
+                "analysis": analysis.to_dict(),
+            }
+
+        # Step 3: Execute
+        executed = await orchestrator.execute_ai_signal(trade_signal)
+        return {
+            "status": "OK",
+            "message": f"AI {'EXECUTED' if executed else 'REJECTED'} {trade_signal.action} {symbol}",
+            "trade_signal": trade_signal.to_dict(),
+            "executed": executed,
+        }
+
+    except Exception as e:
+        logger.error(f"AI trade trigger error: {e}")
+        return {"status": "ERROR", "message": str(e)}
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  SETTINGS API — Configuration Management
 # ═══════════════════════════════════════════════════════════════════════

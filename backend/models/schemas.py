@@ -55,6 +55,7 @@ class SignalType(str, Enum):
     WTF_PATTERN = "WTF_MIDWEEK_REVERSAL"        # Wednesday reversal
     LIQUIDITY_SWEEP = "LIQUIDITY_SWEEP"         # Pure stop hunt scalp
     MOMENTUM_REVERSAL = "MOMENTUM_REVERSAL"     # EMA + wick rejection fallback
+    AI_SIGNAL = "AI_SIGNAL"                     # Gemini AI-generated trade signal
 
 
 class InductionState(str, Enum):
