@@ -301,14 +301,15 @@ class GeminiAdvisor:
                 "temperature": 0.3,
                 "topP": 0.8,
                 "topK": 40,
-                "maxOutputTokens": 1024,
+                "maxOutputTokens": 8192,
                 "responseMimeType": "application/json",
+                "thinkingConfig": {"thinkingBudget": 0},
             },
         }
 
         try:
             if not self._client:
-                self._client = httpx.AsyncClient(timeout=30)
+                self._client = httpx.AsyncClient(timeout=60)
 
             resp = await self._client.post(
                 f"{url}?key={self._api_key}",
@@ -354,8 +355,15 @@ class GeminiAdvisor:
                 cleaned = "\n".join(lines[1:-1]) if len(lines) > 2 else cleaned
             return json.loads(cleaned)
         except json.JSONDecodeError as e:
+            # Try to extract JSON object from mixed text
+            try:
+                start = text.index("{")
+                end = text.rindex("}") + 1
+                return json.loads(text[start:end])
+            except (ValueError, json.JSONDecodeError):
+                pass
             logger.warning(f"Failed to parse Gemini JSON: {e}")
-            logger.debug(f"Raw response: {text[:300]}")
+            logger.warning(f"Raw response (first 500 chars): {text[:500]}")
             return None
 
     # ─────────────────────────────────────────────────────────────────

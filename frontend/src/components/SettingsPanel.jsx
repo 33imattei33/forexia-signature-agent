@@ -842,12 +842,20 @@ export default function SettingsPanel({ isOpen, onClose }) {
                       </>
                     }
                   />
-                  <Field
-                    label="Gemini Model"
-                    value={settings.agent.gemini_model || 'gemini-2.0-flash'}
-                    onChange={(v) => updateAgent('gemini_model', v)}
-                    description="gemini-2.0-flash (fast, free) or gemini-2.5-pro (best quality)"
-                  />
+                  <div>
+                    <label className="block text-[9px] font-bold text-gray-400 uppercase tracking-wider mb-1">Gemini Model</label>
+                    <select
+                      value={settings.agent.gemini_model || 'gemini-2.5-flash'}
+                      onChange={(e) => updateAgent('gemini_model', e.target.value)}
+                      className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-[11px] text-gray-200 focus:border-forexia-accent focus:outline-none"
+                    >
+                      <option value="gemini-2.5-flash">gemini-2.5-flash (fast + free)</option>
+                      <option value="gemini-2.5-pro">gemini-2.5-pro (best quality)</option>
+                      <option value="gemini-2.0-flash">gemini-2.0-flash (legacy)</option>
+                      <option value="gemini-2.0-flash-lite">gemini-2.0-flash-lite (lightest)</option>
+                    </select>
+                    <p className="text-[8px] text-gray-600 mt-0.5">Select AI model — 2.5-flash recommended for free tier</p>
+                  </div>
                 </div>
               </div>
             </div>

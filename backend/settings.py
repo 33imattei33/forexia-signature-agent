@@ -75,7 +75,7 @@ class AgentSettings(BaseModel):
     news_scrape_interval_min: int = Field(default=60, description="News scrape interval (minutes)")
     # Gemini AI Advisor
     gemini_api_key: str = Field(default="", description="Google Gemini API key (get free at aistudio.google.com/apikey)")
-    gemini_model: str = Field(default="gemini-2.0-flash", description="Gemini model (gemini-2.0-flash = fast+free, gemini-2.5-pro = best)")
+    gemini_model: str = Field(default="gemini-2.5-flash", description="Gemini model (gemini-2.5-flash = fast+free, gemini-2.5-pro = best)")
 
 
 class ForexiaSettings(BaseModel):

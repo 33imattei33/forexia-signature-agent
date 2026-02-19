@@ -1032,8 +1032,8 @@ async def update_settings(request: Request):
     # Update agent settings
     if "agent" in body:
         agent_data = body["agent"]
-        # Don't overwrite Gemini API key with the masked value
-        if agent_data.get("gemini_api_key") in ("••••••••", "", None):
+        # Don't overwrite Gemini API key with the masked value (but allow setting a new key)
+        if agent_data.get("gemini_api_key") in ("••••••••", None):
             agent_data["gemini_api_key"] = current.agent.gemini_api_key
         current.agent = AgentSettings(**{**current.agent.model_dump(), **agent_data})
 
