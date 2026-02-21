@@ -97,7 +97,7 @@ export default function AutoTradeBot({ brokerConnected }) {
         <div className="bg-gray-900/50 rounded px-3 py-2 border border-gray-800">
           <p className="text-[9px] uppercase tracking-wider text-gray-600">Mode</p>
           <p className={`text-xs font-bold ${isOn ? 'text-forexia-green' : 'text-gray-500'}`}>
-            {isOn ? 'AUTO' : 'MANUAL'}
+            {isOn ? 'AUTO + AI' : 'MANUAL'}
           </p>
         </div>
         <div className="bg-gray-900/50 rounded px-3 py-2 border border-gray-800">
@@ -113,6 +113,21 @@ export default function AutoTradeBot({ brokerConnected }) {
           </p>
         </div>
       </div>
+
+      {/* AI Status */}
+      {botStatus?.ai_enabled && (
+        <div className="mb-3 flex items-center gap-2 px-2 py-1.5 rounded bg-purple-500/5 border border-purple-500/15">
+          <span className={`w-2 h-2 rounded-full ${
+            botStatus?.ai_scanning ? 'bg-purple-400 animate-pulse' : 'bg-gray-600'
+          }`} />
+          <span className="text-[9px] text-purple-400 font-mono">
+            Gemini AI: {botStatus?.ai_scanning ? 'SCANNING' : 'STANDBY'}
+            {botStatus?.ai_trades_generated > 0 && (
+              <> · {botStatus.ai_trades_generated} signals generated</>
+            )}
+          </span>
+        </div>
+      )}
 
       {/* Pairs Being Monitored */}
       <div className="mb-4">
@@ -194,11 +209,15 @@ export default function AutoTradeBot({ brokerConnected }) {
               className={`px-3 py-2 rounded text-[10px] font-mono border ${
                 r.executed
                   ? 'bg-forexia-green/10 border-forexia-green/20 text-forexia-green'
-                  : 'bg-forexia-gold/10 border-forexia-gold/20 text-forexia-gold'
+                  : r.source === 'gemini_ai'
+                    ? 'bg-purple-500/10 border-purple-500/20 text-purple-400'
+                    : 'bg-forexia-gold/10 border-forexia-gold/20 text-forexia-gold'
               }`}
             >
               <div className="flex justify-between">
-                <span className="font-bold">{r.symbol} {r.direction}</span>
+                <span className="font-bold">
+                  {r.source === 'gemini_ai' ? '🤖 ' : ''}{r.symbol} {r.direction}
+                </span>
                 <span>{(r.confidence * 100).toFixed(0)}% conf</span>
               </div>
               <div className="text-gray-400 mt-0.5">
@@ -242,8 +261,9 @@ export default function AutoTradeBot({ brokerConnected }) {
       {isOn && (
         <div className="mt-3 px-3 py-2 rounded bg-forexia-green/5 border border-forexia-green/15">
           <p className="text-[9px] text-forexia-green font-mono">
-            ✓ Auto-trade is ON — Signals above {((botStatus?.min_confidence ?? 0.6) * 100).toFixed(0)}%
-            confidence will be executed automatically when scanned.
+            ✓ Auto-trade is ON — Rule engine + AI Advisor scanning every 2 min.
+            Signals above {((botStatus?.min_confidence ?? 0.6) * 100).toFixed(0)}%
+            confidence will be executed automatically.
           </p>
         </div>
       )}

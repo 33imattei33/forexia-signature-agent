@@ -59,6 +59,7 @@ class RiskManager:
         entry_price: float = 0.0,
         stop_loss: float = 0.0,
         symbol: str = "EURUSD",
+        consecutive_losses: int = 0,
     ) -> float:
         """
         Calculate position size using RISK-BASED sizing.
@@ -67,11 +68,10 @@ class RiskManager:
         Fallback rule: 0.01 lots per $100 of equity.
         We take the MINIMUM of both to stay safe.
         
-        Risk-based formula:
-          risk_amount = equity * (max_risk_percent / 100)
-          sl_pips = |entry - sl| / pip_value
-          pip_dollar_value = contract_size * pip_value / rate (for JPY)
-          lot_size = risk_amount / (sl_pips * pip_dollar_value)
+        Anti-tilt: After consecutive losses, reduce size progressively:
+          - 3+ losses: 75% of normal size
+          - 5+ losses: 50% of normal size
+          - 8+ losses: 25% of normal size
         
         Returns: lot size rounded to 2 decimal places
         """
@@ -106,9 +106,27 @@ class RiskManager:
         # Take the MORE CONSERVATIVE of the two
         lot_size = min(equity_lots, risk_lots)
 
-        # HARD CAP: Never exceed max_lot_size (default 0.10 lots)
-        max_lot = getattr(self.config, 'max_lot_size', 0.10)
+        # HARD CAP: Per-symbol max lot size
+        max_lot = getattr(self.config, 'max_lot_size', 0.50)
+        s = symbol.upper()
+        # Gold: reduce max lot — high dollar-per-pip
+        if "XAU" in s or "GOLD" in s:
+            max_lot = min(max_lot, 0.20)
+        # Exotic low-vol pairs: reduce max lot — poor liquidity
+        elif s in ("AUDNZD", "NZDCHF", "EURNZD", "GBPNZD", "AUDCHF", "EURCHF", "NZDUSD"):
+            max_lot = min(max_lot, 0.25)
         lot_size = min(lot_size, max_lot)
+
+        # ANTI-TILT: Reduce size after consecutive losses
+        if consecutive_losses >= 8:
+            lot_size *= 0.25
+            logger.warning(f"Anti-tilt: {consecutive_losses} consecutive losses \u2014 lot size reduced to 25%")
+        elif consecutive_losses >= 5:
+            lot_size *= 0.50
+            logger.warning(f"Anti-tilt: {consecutive_losses} consecutive losses \u2014 lot size reduced to 50%")
+        elif consecutive_losses >= 3:
+            lot_size *= 0.75
+            logger.info(f"Anti-tilt: {consecutive_losses} consecutive losses \u2014 lot size reduced to 75%")
 
         # Minimum lot size: 0.01
         lot_size = max(0.01, lot_size)
@@ -140,20 +158,32 @@ class RiskManager:
         entry_price: float = 0.0,
     ) -> float:
         """
-        Calculate stop-loss placement — FIXED 20 pips from entry.
+        Calculate stop-loss placement — ADAPTIVE per pair type.
         
-        Strategy mandate: All trades get exactly 20 pip stop-loss.
-        This provides tight risk control while allowing room for noise.
-        
-        Args:
-            direction: BUY or SELL
-            stop_hunt_extreme: The wick extreme (legacy, used as fallback)
-            symbol: Used to determine pip value
-            entry_price: Current entry price for fixed-pip SL calculation
+        Pair-specific SL to account for volatility:
+          - Major pairs (EURUSD, GBPUSD, etc): 20 pips
+          - JPY pairs: 20 pips (= 0.20 JPY movement)
+          - XAUUSD (Gold): 50 pips (= $5.00 movement — gold is volatile)
+          - Exotic/low-vol pairs (AUDNZD, EURNZD, etc): 25 pips
         
         Returns: stop-loss price
         """
-        sl_pips = self.config.stop_loss_buffer_pips  # 20 pips
+        # Adaptive SL based on symbol volatility class
+        base_sl_pips = self.config.stop_loss_buffer_pips  # fallback 20 pips
+        s = symbol.upper()
+        if "XAU" in s or "GOLD" in s:
+            sl_pips = 50.0  # Gold needs wider SL — high volatility
+        elif any(x in s for x in ["NZD", "CHF", "CAD", "AUD"]):
+            # Check if it's an exotic cross (not just a major with these)
+            if not s.startswith("EUR") and not s.startswith("GBP") and not s.startswith("USD"):
+                sl_pips = 25.0   # Exotic crosses — slightly wider
+            elif s in ("AUDNZD", "NZDCHF", "EURNZD", "GBPNZD", "AUDCHF", "NZDUSD", "NZDJPY"):
+                sl_pips = 25.0
+            else:
+                sl_pips = base_sl_pips  # Standard majors
+        else:
+            sl_pips = base_sl_pips  # Standard 20 pips
+
         pip_val = self._get_pip_value(symbol)
         sl_distance = sl_pips * pip_val
 
@@ -197,58 +227,41 @@ class RiskManager:
         symbol: str = "EURUSD"
     ) -> float:
         """
-        Calculate take-profit target — FIXED 80 pips from entry.
+        Calculate take-profit target — FIXED pip distance per pair type.
         
-        Strategy mandate: All trades target 80 pips TP (4:1 R:R with 20 pip SL).
-        This gives excellent risk-to-reward while being achievable on major pairs.
+        Fixed TP distances:
+          - Standard pairs: 80 pips (4:1 R:R with 20 pip SL)
+          - XAUUSD (Gold): 125 pips (2.5:1 R:R with 50 pip SL)
+          - Exotic pairs: 60 pips (2.4:1 R:R with 25 pip SL)
         """
-        risk = abs(entry_price - stop_loss)
         pip_value = self._get_pip_value(symbol)
+        s = symbol.upper()
 
-        # FIXED TP: Always use take_profit_pips (80 pips)
-        fixed_tp_pips = getattr(self.config, 'take_profit_pips', 80.0)
-        if fixed_tp_pips <= 0:
-            fixed_tp_pips = 80.0  # Enforce minimum
+        # Fixed TP pips per pair type
+        if "XAU" in s or "GOLD" in s:
+            tp_pips = 125.0  # Gold: wide SL, big targets
+        elif s in ("AUDNZD", "NZDCHF", "EURNZD", "GBPNZD", "AUDCHF", "EURCHF"):
+            tp_pips = 60.0   # Exotics: less momentum
+        else:
+            tp_pips = 80.0   # Majors: 80 pips (70-100 range)
 
-        tp_distance = fixed_tp_pips * pip_value
+        tp_distance = tp_pips * pip_value
+
         if direction == TradeDirection.BUY:
             tp = entry_price + tp_distance
         else:
             tp = entry_price - tp_distance
 
-        actual_rr = abs(tp - entry_price) / risk if risk > 0 else 0
+        risk = abs(entry_price - stop_loss)
+        actual_rr = tp_distance / risk if risk > 0 else 0
         logger.info(
             f"══╡ TAKE-PROFIT (FIXED) — {tp:.5f} ╞══\n"
             f"    Entry: {entry_price:.5f}\n"
-            f"    TP: {fixed_tp_pips:.0f} pips (fixed mode)\n"
-            f"    Risk: {risk / pip_value:.1f} pips\n"
+            f"    SL distance: {risk / pip_value:.1f} pips\n"
+            f"    TP distance: {tp_pips:.0f} pips\n"
             f"    R:R Ratio: 1:{actual_rr:.2f}\n"
-            f"    Strategy: Fixed 20 SL / 80 TP — 4:1 R:R"
+            f"    Strategy: Fixed {tp_pips:.0f} pip TP for {symbol}"
         )
-        return round(tp, 5)
-
-        # Ratio-based fallback no longer used — all trades use fixed TP above
-        # This code is unreachable but kept for reference
-        min_tp_distance = risk * self.config.take_profit_ratio
-
-        if direction == TradeDirection.BUY:
-            min_tp = entry_price + min_tp_distance
-            tp = max(min_tp, target_liquidity) if target_liquidity else min_tp
-        else:
-            min_tp = entry_price - min_tp_distance
-            tp = min(min_tp, target_liquidity) if target_liquidity else min_tp
-
-        actual_rr = abs(tp - entry_price) / risk if risk > 0 else 0
-
-        logger.info(
-            f"══╡ TAKE-PROFIT — {tp:.5f} ╞══\n"
-            f"    Entry: {entry_price:.5f}\n"
-            f"    Risk: {risk * 10000:.1f} pips\n"
-            f"    Reward: {abs(tp - entry_price) * 10000:.1f} pips\n"
-            f"    R:R Ratio: 1:{actual_rr:.1f}\n"
-            f"    {'Target: Opposite liquidity pool' if target_liquidity else 'Target: Ratio-based'}"
-        )
-
         return round(tp, 5)
 
     # ─────────────────────────────────────────────────────────────────
@@ -329,7 +342,8 @@ class RiskManager:
         stop_hunt_extreme: float,
         symbol: str = "EURUSD",
         target_liquidity: Optional[float] = None,
-        spread_pips: float = 0
+        spread_pips: float = 0,
+        consecutive_losses: int = 0,
     ) -> Optional[dict]:
         """
         Build a complete risk package for trade execution.
@@ -344,7 +358,7 @@ class RiskManager:
         # SL must be calculated FIRST — lot sizing depends on SL distance
         stop_loss = self.calculate_stop_loss(direction, stop_hunt_extreme, symbol, entry_price=entry_price)
         lot_size = self.calculate_lot_size(
-            account, entry_price, stop_loss, symbol
+            account, entry_price, stop_loss, symbol, consecutive_losses=consecutive_losses
         )
         take_profit = self.calculate_take_profit(
             direction, entry_price, stop_loss, target_liquidity, symbol
@@ -401,10 +415,13 @@ class RiskManager:
     def _get_pip_value(symbol: str) -> float:
         """
         Get the pip value for a symbol.
-        Standard: 0.0001 for most pairs, 0.01 for JPY pairs.
+        Standard: 0.0001 for most pairs, 0.01 for JPY/XAU pairs.
         """
-        if "JPY" in symbol:
+        s = symbol.upper()
+        if "JPY" in s:
             return 0.01
+        if "XAU" in s or "GOLD" in s:
+            return 0.01  # Gold: 1 pip = $0.01
         return 0.0001
 
     @property

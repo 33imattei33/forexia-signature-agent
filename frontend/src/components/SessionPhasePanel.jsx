@@ -45,8 +45,27 @@ const PHASE_CONFIG = {
   },
 };
 
+/**
+ * Determine session phase from UTC time (client-side fallback).
+ * Ensures we never show "MARKET CLOSED" on weekdays.
+ */
+function getClientSidePhase() {
+  const now = new Date();
+  const day = now.getUTCDay(); // 0=Sun, 6=Sat
+  if (day === 0 || day === 6) return 'MARKET_CLOSED';
+  const h = now.getUTCHours();
+  if (h >= 0 && h < 8) return 'ASIAN_CONSOLIDATION';
+  if (h >= 8 && h < 13) return 'LONDON_INDUCTION';
+  return 'NEWYORK_REVERSAL';
+}
+
 export default function SessionPhasePanel({ sessionPhase, inKillzone, tradingPermitted }) {
-  const config = PHASE_CONFIG[sessionPhase] || PHASE_CONFIG.MARKET_CLOSED;
+  // Use server phase if valid, otherwise compute from UTC clock
+  const resolvedPhase =
+    sessionPhase && PHASE_CONFIG[sessionPhase]
+      ? sessionPhase
+      : getClientSidePhase();
+  const config = PHASE_CONFIG[resolvedPhase];
 
   return (
     <div className="glass-panel rounded-xl p-6">

@@ -8,7 +8,7 @@
 import { useState, useEffect, useCallback } from 'react';
 
 const API_BASE = '';
-const POLL_INTERVAL = 3000; // 3 seconds
+const POLL_INTERVAL = 2000; // 2 seconds — real-time P&L sync
 
 /**
  * Core fetch wrapper with error handling
@@ -87,7 +87,7 @@ export function useSession() {
     const interval = setInterval(() => {
       fetchSession();
       fetchMultiPair();
-    }, 5000);
+    }, 3000); // 3s — session/multi-pair sync
     return () => clearInterval(interval);
   }, []);
 

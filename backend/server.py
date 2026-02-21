@@ -22,6 +22,7 @@ CORS is configured for the React frontend.
 import logging
 import asyncio
 import os
+import time
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -70,9 +71,15 @@ async def lifespan(app: FastAPI):
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     logger.info("Starting Forexia Signature Agent server...")
-    await orchestrator.start()
+    try:
+        await orchestrator.start()
+    except Exception as e:
+        logger.error(f"Orchestrator startup failed: {e} — server will start in degraded mode")
     # Load multi-account settings if file exists
-    multi_orchestrator.configure_from_settings("multi_accounts.json")
+    try:
+        multi_orchestrator.configure_from_settings("multi_accounts.json")
+    except Exception as e:
+        logger.error(f"Multi-account config failed: {e} — continuing without multi-accounts")
     yield
     # Shutdown
     logger.info("Shutting down Forexia Signature Agent...")
@@ -296,7 +303,7 @@ async def get_trade_history(days: int = 30):
                     "open_price": pos.get("open_price", 0),
                     "sl": pos.get("sl", 0),
                     "tp": pos.get("tp", 0),
-                    "profit": round(pos.get("profit", 0), 2),
+                    "profit": round(pos.get("profit", 0) + pos.get("swap", 0), 2),
                     "swap": round(pos.get("swap", 0), 2),
                     "commission": round(pos.get("commission", 0), 2),
                     "status": "open",
@@ -645,6 +652,11 @@ async def get_open_positions():
         return []
 
     positions = await bridge.get_open_positions()
+    # Include swap in profit for consistent P&L across all panels
+    for pos in positions:
+        raw_profit = float(pos.get("profit", 0))
+        swap = float(pos.get("swap", 0))
+        pos["profit"] = round(raw_profit + swap, 2)
     return positions
 
 
@@ -653,7 +665,7 @@ async def get_open_positions():
 # ═══════════════════════════════════════════════════════════════════════
 
 @app.get("/api/candles")
-async def get_candles(symbol: str = "EURUSD", timeframe: str = "H1", count: int = 300):
+async def get_candles(symbol: str = "EURUSD", timeframe: str = "H1", count: int = 5000):
     """
     Get OHLCV candle data for the live chart.
     Returns: [{ time, open, high, low, close, volume }, ...]
@@ -663,7 +675,7 @@ async def get_candles(symbol: str = "EURUSD", timeframe: str = "H1", count: int 
     if not bridge or not bridge.is_connected:
         return []
 
-    candles = await bridge.get_candles(symbol, timeframe, min(count, 1000))
+    candles = await bridge.get_candles(symbol, timeframe, min(count, 10000))
     result = []
     for c in candles:
         ts = c.timestamp
@@ -779,11 +791,24 @@ async def toggle_auto_trade(request: Request):
     settings.save()
     orchestrator.apply_settings(settings)
 
-    # Start or stop the auto-scan background loop
+    # Start or stop the auto-scan background loop + Gemini AI scan
     if settings.agent.auto_trade:
         orchestrator._start_auto_scan()
+        orchestrator._start_position_manager()
+        # Also start Gemini AI scan loop if configured
+        if orchestrator.gemini.is_enabled:
+            try:
+                await orchestrator.gemini.start_scan_loop(orchestrator)
+                logger.info("Gemini AI Advisor scan loop STARTED with Auto-Trade Bot")
+            except Exception as e:
+                logger.warning(f"Could not start Gemini scan loop: {e}")
     else:
         orchestrator._stop_auto_scan()
+        # Stop Gemini AI scan loop when bot is disabled
+        try:
+            await orchestrator.gemini.stop_scan_loop()
+        except Exception:
+            pass
 
     status = "ENABLED" if settings.agent.auto_trade else "DISABLED"
     logger.info(f"Auto-Trade Bot {status}")
@@ -799,6 +824,7 @@ async def trigger_bot_scan():
     """
     Manually trigger the analysis bot to scan all configured pairs.
     Runs the full 9-gate Forexia pipeline on each pair.
+    If no rule-based signal fires, asks Gemini AI for trade signals.
     Returns any signals found + trades executed (if auto-trade is on).
     Manual scans bypass the weekly-structure gate (force mode).
     """
@@ -818,6 +844,20 @@ async def trigger_bot_scan():
     weekly_act = orchestrator.weekly.get_current_act(utc_now)
     trading_permitted = orchestrator.weekly.is_trading_permitted(utc_now)
     session_phase = orchestrator.dialectic.get_current_phase(utc_now)
+    balance = getattr(orchestrator._account, "balance", 0)
+    equity = getattr(orchestrator._account, "equity", 0)
+
+    # Get open positions for AI context
+    open_positions = []
+    open_symbols = set()
+    try:
+        open_positions = await bridge.get_open_positions()
+        for pos in open_positions:
+            sym = (pos.get("symbol") or "").rstrip(".")
+            if sym:
+                open_symbols.add(sym)
+    except Exception:
+        pass
 
     results = []
 
@@ -829,6 +869,7 @@ async def trigger_bot_scan():
                 timeframe=timeframe,
                 force=True,
             )
+            executed_rule = False
             if signal:
                 # Calculate risk metrics for display
                 pip_val = 0.01 if "JPY" in symbol else 0.0001
@@ -839,6 +880,7 @@ async def trigger_bot_scan():
                 entry = {
                     "symbol": symbol,
                     "signal_id": signal.signal_id,
+                    "source": "rule_engine",
                     "direction": signal.direction.value,
                     "confidence": signal.confidence,
                     "entry": signal.entry_price,
@@ -856,10 +898,107 @@ async def trigger_bot_scan():
                     trade = await orchestrator.execute_signal(signal)
                     entry["executed"] = trade is not None and trade.status.value == "EXECUTED"
                     entry["ticket"] = trade.mt4_ticket if trade else None
+                    executed_rule = entry["executed"]
+                    if executed_rule:
+                        open_symbols.add(symbol)
 
                 results.append(entry)
-            else:
-                results.append({"symbol": symbol, "signal_id": None, "message": "No signal"})
+
+            # ═══ If no rule-based signal, try Gemini AI ═══
+            if not executed_rule and symbol not in open_symbols and orchestrator.gemini.is_enabled:
+                try:
+                    candles = await bridge.get_candles(symbol, "M1", 100)
+                    m15_candles = await bridge.get_candles(symbol, "M15", 50) or []
+                    h1_candles = await bridge.get_candles(symbol, "H1", 24) or []
+                    if candles and len(candles) >= 20:
+                        spread = 0
+                        bid = 0
+                        ask = 0
+                        try:
+                            price_info = await bridge.get_current_price(symbol)
+                            if price_info:
+                                spread = price_info.get("spread", 0)
+                                bid = price_info.get("bid", 0)
+                                ask = price_info.get("ask", 0)
+                        except Exception:
+                            pass
+
+                        analysis = await orchestrator.gemini.analyze_pair(
+                            symbol=symbol,
+                            candles=candles,
+                            session_phase=session_phase.value,
+                            weekly_act=weekly_act.value,
+                            account_balance=balance,
+                            account_equity=equity,
+                            open_positions=open_positions,
+                            spread=spread,
+                            m15_candles=m15_candles,
+                            h1_candles=h1_candles,
+                        )
+
+                        if (analysis and analysis.confidence >= 0.40
+                                and spread <= settings.risk.max_spread_pips):
+                            import asyncio as _aio
+                            await _aio.sleep(2)
+                            ai_signal = await orchestrator.gemini.generate_trade_signal(
+                                symbol=symbol,
+                                candles=candles,
+                                session_phase=session_phase.value,
+                                weekly_act=weekly_act.value,
+                                account_balance=balance,
+                                account_equity=equity,
+                                open_positions=open_positions,
+                                spread=spread,
+                                bid=bid,
+                                ask=ask,
+                                m15_candles=m15_candles,
+                                h1_candles=h1_candles,
+                            )
+                            if ai_signal:
+                                ai_entry = {
+                                    "symbol": symbol,
+                                    "signal_id": f"AI-{symbol[:6]}",
+                                    "source": "gemini_ai",
+                                    "direction": ai_signal.action,
+                                    "confidence": ai_signal.confidence,
+                                    "entry": ai_signal.entry_price,
+                                    "sl": ai_signal.stop_loss,
+                                    "tp": ai_signal.take_profit,
+                                    "lots": 0,
+                                    "type": "AI_SIGNAL",
+                                    "risk_pips": ai_signal.risk_pips,
+                                    "reward_pips": ai_signal.reward_pips,
+                                    "rr_ratio": round(ai_signal.reward_pips / ai_signal.risk_pips, 1) if ai_signal.risk_pips > 0 else 0,
+                                    "executed": False,
+                                }
+                                if auto_execute:
+                                    executed = await orchestrator.execute_ai_signal(ai_signal)
+                                    ai_entry["executed"] = executed
+                                    if executed:
+                                        open_symbols.add(symbol)
+                                results.append(ai_entry)
+                            elif not signal:
+                                # Only add "no signal" if neither rule nor AI found anything
+                                results.append({
+                                    "symbol": symbol,
+                                    "signal_id": None,
+                                    "message": f"No signal (AI: {analysis.market_regime if analysis else 'N/A'})"
+                                })
+                        elif not signal:
+                            results.append({
+                                "symbol": symbol,
+                                "signal_id": None,
+                                "message": f"No signal (AI conf: {analysis.confidence:.0%})" if analysis else "No signal"
+                            })
+                except Exception as e:
+                    logger.error(f"Bot scan AI error for {symbol}: {e}")
+                    if not signal:
+                        results.append({"symbol": symbol, "signal_id": None, "message": f"AI Error: {str(e)}"})
+            elif not signal and symbol not in open_symbols:
+                results.append({"symbol": symbol, "signal_id": None, "message": "No signal (AI disabled)"})
+            elif symbol in open_symbols:
+                results.append({"symbol": symbol, "signal_id": None, "message": "Skipped (position open)"})
+
         except Exception as e:
             logger.error(f"Bot scan error for {symbol}: {e}")
             results.append({"symbol": symbol, "signal_id": None, "message": f"Error: {str(e)}"})
@@ -882,6 +1021,8 @@ async def trigger_bot_scan():
         "trading_permitted": trading_permitted,
         "session_phase": session_phase.value if hasattr(session_phase, 'value') else str(session_phase),
         "results": results,
+        "open_symbols": list(open_symbols),
+        "ai_enabled": orchestrator.gemini.is_enabled,
     }
 
 
@@ -899,6 +1040,9 @@ async def get_bot_status():
         "broker_connected": bridge.is_connected if bridge else False,
         "active_signals": len(orchestrator._active_signals),
         "total_trades": len(orchestrator._trade_history),
+        "ai_enabled": orchestrator.gemini.is_enabled,
+        "ai_scanning": bool(orchestrator.gemini._scan_task and not orchestrator.gemini._scan_task.done()),
+        "ai_trades_generated": len(orchestrator.gemini.get_ai_trade_signals()),
     }
 
 
@@ -1409,6 +1553,355 @@ async def multi_account_daily_reset():
     """Reset daily counters for all accounts."""
     multi_orchestrator.account_manager.daily_reset()
     return {"status": "OK", "message": "Daily reset complete"}
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  SUPER ADMIN API — Full Bot Control & Analytics
+# ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/admin/overview")
+async def admin_overview():
+    """Complete admin overview — everything in one call."""
+    account = orchestrator._account
+    bridge = orchestrator.bridge
+    connected = bridge.is_connected if bridge else False
+
+    # Gather all data
+    open_positions = []
+    closed_trades = []
+    if connected:
+        try:
+            open_positions = await bridge.get_open_positions()
+        except Exception:
+            pass
+        try:
+            closed_trades = await bridge.get_trade_history()
+        except Exception:
+            pass
+
+    # Performance stats
+    total_profit = 0
+    total_loss = 0
+    wins = 0
+    losses = 0
+    by_pair = {}
+    by_direction = {"BUY": {"profit": 0, "count": 0, "wins": 0}, "SELL": {"profit": 0, "count": 0, "wins": 0}}
+
+    for t in closed_trades:
+        pnl = float(t.get("profit", 0)) + float(t.get("swap", 0))
+        sym = (t.get("symbol") or "").rstrip(".")
+        direction = (t.get("direction") or "BUY").upper()
+        if pnl >= 0:
+            total_profit += pnl
+            wins += 1
+        else:
+            total_loss += abs(pnl)
+            losses += 1
+        # Per-pair
+        if sym not in by_pair:
+            by_pair[sym] = {"profit": 0, "count": 0, "wins": 0, "losses": 0, "total_lots": 0}
+        by_pair[sym]["profit"] += pnl
+        by_pair[sym]["count"] += 1
+        by_pair[sym]["total_lots"] += float(t.get("volume", 0))
+        if pnl >= 0:
+            by_pair[sym]["wins"] += 1
+        else:
+            by_pair[sym]["losses"] += 1
+        # Per-direction
+        if direction in by_direction:
+            by_direction[direction]["profit"] += pnl
+            by_direction[direction]["count"] += 1
+            if pnl >= 0:
+                by_direction[direction]["wins"] += 1
+
+    total_trades = wins + losses
+    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+    profit_factor = (total_profit / total_loss) if total_loss > 0 else total_profit
+    net_pnl = total_profit - total_loss
+
+    # Consecutive loss tracking
+    consecutive = getattr(orchestrator, "_consecutive_losses", 0)
+    sl_cooldown = getattr(orchestrator, "_sl_cooldown", {})
+
+    # AI status
+    ai = orchestrator.gemini
+    ai_state = ai.get_full_state() if ai.is_enabled else {"status": ai.status}
+
+    # Sort pairs by P&L
+    pair_ranking = sorted(by_pair.items(), key=lambda x: x[1]["profit"], reverse=True)
+
+    return {
+        "account": {
+            "balance": getattr(account, "balance", 0),
+            "equity": getattr(account, "equity", 0),
+            "margin": getattr(account, "margin", 0),
+            "free_margin": getattr(account, "free_margin", 0),
+            "margin_level": getattr(account, "margin_level", 0),
+            "open_trades": len(open_positions),
+            "daily_pnl": getattr(account, "daily_pnl", 0),
+        },
+        "performance": {
+            "net_pnl": round(net_pnl, 2),
+            "total_profit": round(total_profit, 2),
+            "total_loss": round(total_loss, 2),
+            "profit_factor": round(profit_factor, 2),
+            "total_trades": total_trades,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(win_rate, 1),
+        },
+        "by_pair": [
+            {"symbol": sym, **{k: round(v, 2) if isinstance(v, float) else v for k, v in d.items()}}
+            for sym, d in pair_ranking
+        ],
+        "by_direction": {
+            k: {kk: round(vv, 2) if isinstance(vv, float) else vv for kk, vv in v.items()}
+            for k, v in by_direction.items()
+        },
+        "risk_state": {
+            "consecutive_losses": consecutive,
+            "sl_cooldowns": {k: {"direction": v[0], "until": v[1].isoformat()} for k, v in sl_cooldown.items()} if sl_cooldown else {},
+            "anti_tilt_active": consecutive >= 3,
+            "lot_reduction": "75%" if consecutive >= 3 and consecutive < 5 else "50%" if consecutive >= 5 and consecutive < 8 else "25%" if consecutive >= 8 else "100%",
+        },
+        "ai_state": ai_state,
+        "system": {
+            "broker_connected": connected,
+            "auto_trade": orchestrator._settings.agent.auto_trade,
+            "session": orchestrator.dialectic.get_current_phase(datetime.utcnow()).value,
+            "weekly_act": orchestrator.weekly.get_current_act(datetime.utcnow()).value,
+            "uptime": (datetime.utcnow() - orchestrator._start_time).total_seconds() if hasattr(orchestrator, "_start_time") else 0,
+        },
+        "open_positions": open_positions,
+        "settings": orchestrator._settings.to_safe_dict(),
+    }
+
+
+@app.get("/api/admin/performance")
+async def admin_performance():
+    """Detailed performance analytics with equity curve data."""
+    bridge = orchestrator.bridge
+    closed_trades = []
+    if bridge and bridge.is_connected:
+        try:
+            closed_trades = await bridge.get_trade_history()
+        except Exception:
+            pass
+
+    # Build equity curve
+    equity_curve = []
+    running_pnl = 0
+    daily_pnl = {}
+    streak_current = 0
+    streak_max_win = 0
+    streak_max_loss = 0
+    max_dd = 0
+    peak = 0
+
+    for t in closed_trades:
+        pnl = float(t.get("profit", 0)) + float(t.get("swap", 0))
+        running_pnl += pnl
+        peak = max(peak, running_pnl)
+        dd = peak - running_pnl
+        max_dd = max(max_dd, dd)
+
+        # Streaks
+        if pnl >= 0:
+            streak_current = max(0, streak_current) + 1
+            streak_max_win = max(streak_max_win, streak_current)
+        else:
+            streak_current = min(0, streak_current) - 1
+            streak_max_loss = max(streak_max_loss, abs(streak_current))
+
+        # Daily P&L
+        close_time = t.get("close_time", "")
+        day = close_time[:10] if close_time else "unknown"
+        if day not in daily_pnl:
+            daily_pnl[day] = 0
+        daily_pnl[day] += pnl
+
+        equity_curve.append({
+            "trade_num": len(equity_curve) + 1,
+            "pnl": round(pnl, 2),
+            "cumulative": round(running_pnl, 2),
+            "drawdown": round(dd, 2),
+            "symbol": (t.get("symbol") or "").rstrip("."),
+            "direction": t.get("direction", ""),
+            "close_time": close_time,
+        })
+
+    # Win/loss by hour
+    hourly = {}
+    for t in closed_trades:
+        close_time = t.get("close_time", "")
+        if close_time and len(close_time) >= 13:
+            hour = close_time[11:13]
+            if hour not in hourly:
+                hourly[hour] = {"wins": 0, "losses": 0, "pnl": 0}
+            pnl = float(t.get("profit", 0)) + float(t.get("swap", 0))
+            hourly[hour]["pnl"] += pnl
+            if pnl >= 0:
+                hourly[hour]["wins"] += 1
+            else:
+                hourly[hour]["losses"] += 1
+
+    profitable_days = sum(1 for v in daily_pnl.values() if v > 0)
+    losing_days = sum(1 for v in daily_pnl.values() if v <= 0)
+
+    return {
+        "equity_curve": equity_curve,
+        "daily_pnl": [{"date": k, "pnl": round(v, 2)} for k, v in sorted(daily_pnl.items())],
+        "hourly_performance": dict(sorted(hourly.items())),
+        "max_drawdown": round(max_dd, 2),
+        "max_win_streak": streak_max_win,
+        "max_loss_streak": streak_max_loss,
+        "profitable_days": profitable_days,
+        "losing_days": losing_days,
+    }
+
+
+@app.put("/api/admin/settings")
+async def admin_update_settings(request: Request):
+    """Update any settings from the admin panel — full granular control."""
+    body = await request.json()
+
+    # Update broker settings
+    if "broker" in body:
+        for key, val in body["broker"].items():
+            if hasattr(orchestrator._settings.broker, key):
+                if key in ("password", "matchtrader_password") and val == "••••••••":
+                    continue  # Skip masked passwords
+                setattr(orchestrator._settings.broker, key, val)
+
+    # Update risk settings
+    if "risk" in body:
+        for key, val in body["risk"].items():
+            if hasattr(orchestrator._settings.risk, key):
+                setattr(orchestrator._settings.risk, key, val)
+        # Propagate to risk manager
+        orchestrator.risk.config = orchestrator._settings.risk
+
+    # Update agent settings
+    if "agent" in body:
+        for key, val in body["agent"].items():
+            if hasattr(orchestrator._settings.agent, key):
+                if key == "gemini_api_key" and val == "••••••••":
+                    continue
+                setattr(orchestrator._settings.agent, key, val)
+        # Reconfigure Gemini if key changed
+        if "gemini_api_key" in body.get("agent", {}):
+            key = body["agent"]["gemini_api_key"]
+            if key and key != "••••••••":
+                orchestrator.gemini.configure(
+                    key, body["agent"].get("gemini_model", orchestrator._settings.agent.gemini_model)
+                )
+
+    # Save to disk
+    orchestrator._settings.save()
+    orchestrator.apply_settings(orchestrator._settings)
+
+    return {"status": "OK", "settings": orchestrator._settings.to_safe_dict()}
+
+
+@app.post("/api/admin/pair-blacklist")
+async def admin_pair_blacklist(request: Request):
+    """Update the pair blacklist dynamically."""
+    body = await request.json()
+    pairs = body.get("blacklist", [])
+    # Store on orchestrator
+    orchestrator._pair_blacklist = set(p.upper() for p in pairs)
+    return {"status": "OK", "blacklist": list(orchestrator._pair_blacklist)}
+
+
+@app.get("/api/admin/pair-blacklist")
+async def admin_get_pair_blacklist():
+    """Get current pair blacklist."""
+    blacklist = getattr(orchestrator, "_pair_blacklist", set())
+    return {"blacklist": list(blacklist)}
+
+
+@app.post("/api/admin/reset-consecutive")
+async def admin_reset_consecutive():
+    """Manually reset the consecutive loss counter."""
+    prev = orchestrator._consecutive_losses
+    orchestrator._consecutive_losses = 0
+    return {"status": "OK", "previous": prev, "current": 0}
+
+
+@app.get("/api/admin/ai-workflow")
+async def admin_ai_workflow():
+    """Get the AI analysis workflow state and configuration."""
+    ai = orchestrator.gemini
+    return {
+        "enabled": ai.is_enabled,
+        "model": ai._model,
+        "daily_calls": ai._daily_calls,
+        "daily_limit": ai._daily_limit,
+        "scan_interval": ai._scan_interval,
+        "analysis_cache": ai.get_all_analyses(),
+        "trade_signals": ai.get_ai_trade_signals(20),
+        "signal_reviews": ai.get_signal_reviews(20),
+        "overview": ai.get_overview(),
+        "models_exhausted": {m: round(t - time.time()) for m, t in ai._model_exhausted.items() if t > time.time()},
+        "market_structure": ai.get_structure_data(),
+    }
+
+
+@app.post("/api/admin/ai-config")
+async def admin_ai_config(request: Request):
+    """Update AI configuration dynamically."""
+    body = await request.json()
+    ai = orchestrator.gemini
+
+    if "scan_interval" in body:
+        ai._scan_interval = max(30, int(body["scan_interval"]))
+    if "daily_limit" in body:
+        ai._daily_limit = max(10, int(body["daily_limit"]))
+    if "min_call_interval" in body:
+        ai._min_call_interval = max(1.0, float(body["min_call_interval"]))
+
+    return {
+        "status": "OK",
+        "scan_interval": ai._scan_interval,
+        "daily_limit": ai._daily_limit,
+        "min_call_interval": ai._min_call_interval,
+    }
+
+
+@app.get("/api/admin/logs")
+async def admin_logs():
+    """Get recent server logs."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["tail", "-100", "/tmp/forexia_server.log"],
+            capture_output=True, text=True, timeout=5,
+        )
+        lines = result.stdout.strip().split("\n") if result.stdout else []
+        return {"logs": lines[-100:], "count": len(lines)}
+    except Exception:
+        return {"logs": [], "count": 0}
+
+
+@app.get("/api/admin/market-structure")
+async def admin_market_structure():
+    """Get computed market structure analysis for all pairs."""
+    ai = orchestrator.gemini
+    structure_data = ai.get_structure_data()
+    return {
+        "pairs": structure_data,
+        "count": len(structure_data),
+    }
+
+
+@app.get("/api/admin/market-structure/{symbol}")
+async def admin_market_structure_symbol(symbol: str):
+    """Get computed market structure for a specific symbol."""
+    ai = orchestrator.gemini
+    cached = ai._structure_analyzer.get_cached(symbol)
+    if not cached:
+        return {"error": f"No structure data for {symbol}"}
+    return cached.to_dict()
 
 
 # ─────────────────────────────────────────────────────────────────────

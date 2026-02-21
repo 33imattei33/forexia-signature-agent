@@ -88,6 +88,7 @@ class ForexiaOrchestrator:
         self._bridge = None  # Active bridge (mt4, mt5, remote_mt5, or matchtrader)
 
         # ── State ──
+        self._start_time = datetime.utcnow()
         self._account = AccountState()
         self._active_signals: List[ForexiaSignal] = []
         self._trade_history: List[TradeRecord] = []
@@ -102,6 +103,21 @@ class ForexiaOrchestrator:
         # ── Win-Rate Protection ──
         # Per-pair SL cooldown: { "EURUSD:BUY": (hit_count, last_sl_time) }
         self._sl_cooldown: Dict[str, tuple] = {}
+        # Consecutive loss tracking for anti-tilt lot sizing
+        self._consecutive_losses: int = 0
+        # Pair blacklist — dynamically configurable from admin panel
+        self._pair_blacklist: set = set()
+        # PERMANENT TOXIC PAIR BAN — These pairs have negative historical expectancy
+        # AUDNZD: -$331 (7 trades, 29% win), NZDUSD: -$32 (0%), NZDCHF: -$4.5 (0%),
+        # CADJPY: -$10 (0%), USDCAD: -$10 (0%), EURCHF: -$9.3 (0%), GBPNZD: -$3.6 (0%),
+        # CHFJPY: -$3.65 (0%), NZDJPY: -$2.87 (0%), XAUUSD: -$471 (40%)
+        self._toxic_pairs: set = {
+            "AUDNZD", "NZDUSD", "NZDCHF", "NZDJPY", "GBPNZD",
+            "CADJPY", "CHFJPY", "EURCHF", "USDCAD", "XAUUSD",
+        }
+        # STAR PAIRS — Proven performers get priority (confidence boost)
+        # GBPJPY: +$1152 (60% win), USDJPY: +$736 (59%), EURJPY: +$171 (56%)
+        self._star_pairs: set = {"GBPJPY", "USDJPY", "EURJPY"}
         # JPY cross pairs (avoid during Asian session)
         self._jpy_crosses = {
             "USDJPY", "EURJPY", "GBPJPY", "AUDJPY", "NZDJPY",
@@ -135,10 +151,12 @@ class ForexiaOrchestrator:
         return set()
 
     def _save_bot_ids(self):
-        """Persist bot-opened position IDs to disk."""
+        """Persist bot-opened position IDs to disk (atomic write)."""
         try:
-            with open(self._bot_ids_file, "w") as f:
+            tmp_file = self._bot_ids_file + ".tmp"
+            with open(tmp_file, "w") as f:
                 json.dump(list(self._bot_opened_ids), f)
+            os.replace(tmp_file, self._bot_ids_file)
         except Exception as e:
             logger.warning(f"Could not save bot position IDs: {e}")
 
@@ -168,7 +186,7 @@ class ForexiaOrchestrator:
         # Apply risk settings
         self.risk.config.lot_per_100_equity = settings.risk.lot_per_100_equity
         self.risk.config.max_risk_percent = settings.risk.max_risk_percent
-        self.risk.config.max_lot_size = getattr(settings.risk, 'max_lot_size', 0.10)
+        self.risk.config.max_lot_size = getattr(settings.risk, 'max_lot_size', 0.50)
         self.risk.config.stop_loss_buffer_pips = settings.risk.stop_loss_buffer_pips
         self.risk.config.take_profit_ratio = settings.risk.take_profit_ratio
         self.risk.config.take_profit_pips = getattr(settings.risk, 'take_profit_pips', 0.0)
@@ -311,8 +329,7 @@ class ForexiaOrchestrator:
 
         # Start auto-scan loop if auto_trade is enabled
         if self._settings.agent.auto_trade:
-            self._start_auto_scan()
-            self._start_position_manager()
+            self._start_auto_scan()  # Also starts position manager + Gemini uses its own scan loop
 
         logger.info(
             "═══ FOREXIA SIGNATURE AGENT — ONLINE ═══\n"
@@ -365,18 +382,21 @@ class ForexiaOrchestrator:
     # ─────────────────────────────────────────────────────────────────
 
     def _start_auto_scan(self):
-        """Start the background auto-scan loop."""
+        """Start the background auto-scan loop and position manager."""
         if self._auto_scan_task and not self._auto_scan_task.done():
             return  # Already running
         self._auto_scan_task = asyncio.create_task(self._auto_scan_loop())
         logger.info("Auto-Scan Loop: STARTED — Scanning every 2 minutes")
+        # Also start position manager
+        self._start_position_manager()
 
     def _stop_auto_scan(self):
-        """Stop the background auto-scan loop."""
+        """Stop the background auto-scan loop and position manager."""
         if self._auto_scan_task:
             self._auto_scan_task.cancel()
             self._auto_scan_task = None
             logger.info("Auto-Scan Loop: STOPPED")
+        self._stop_position_manager()
 
     # ─────────────────────────────────────────────────────────────────
     #  POSITION MANAGER — Breakeven + Trailing Stop + Stale Exit
@@ -422,8 +442,25 @@ class ForexiaOrchestrator:
                 await asyncio.sleep(5)
 
                 if not self.bridge or not self.bridge.is_connected:
+                    # Attempt auto-reconnect
+                    logger.warning("Position Manager: Broker disconnected, attempting reconnect...")
+                    try:
+                        await self.bridge.connect(
+                            self._settings.broker.matchtrader_url,
+                            self._settings.broker.matchtrader_email,
+                            self._settings.broker.matchtrader_password,
+                        )
+                        if self.bridge.is_connected:
+                            logger.info("Position Manager: Broker reconnected successfully!")
+                        else:
+                            logger.warning("Position Manager: Reconnect failed, will retry next cycle")
+                            await asyncio.sleep(15)
+                    except Exception as re_err:
+                        logger.error(f"Position Manager: Reconnect error: {re_err}")
+                        await asyncio.sleep(15)
                     continue
 
+                # Fetch open positions
                 positions = await self.bridge.get_open_positions()
                 if not positions:
                     # Clean up tracking sets if no positions
@@ -552,34 +589,12 @@ class ForexiaOrchestrator:
                                         f"({trail_step}p behind, profit {profit_pips:.1f}p)"
                                     )
 
-                    # ── 3. STALE TRADE EXIT ──
-                    if stale_min > 0 and profit_pips < -2:
-                        # Check if trade has been open too long while negative
-                        # We use the comment field or track internally
-                        # For now, estimate from trade being more than stale_min old
-                        # MatchTrader positions don't always have open_time easily,
-                        # so we track by presence in _be_applied (if never went positive)
-                        if pos_id not in self._be_applied and profit_pips < -5:
-                            # This trade never went positive enough for breakeven
-                            # and is currently losing — candidate for stale exit
-                            # We'll close it after 2 consecutive checks (~10 seconds)
-                            stale_key = f"stale_{pos_id}"
-                            prev_count = self._trailing_sl.get(stale_key, 0)
-                            self._trailing_sl[stale_key] = prev_count + 1
-                            # After stale_min MINUTES while negative, close it
-                            # Each check = 5 seconds, so minutes × 60 ÷ 5 = checks
-                            check_count = (stale_min * 60) // 5
-                            if prev_count >= check_count:
-                                closed = await self.bridge.close_trade(ticket)
-                                if closed:
-                                    logger.warning(
-                                        f"[STALE EXIT] {symbol} #{ticket} CLOSED — "
-                                        f"Negative {profit_pips:.1f}p for >{stale_min} min, "
-                                        f"never reached breakeven"
-                                    )
-                                    # Record SL hit for cooldown system
-                                    direction = "BUY" if side == 0 else "SELL"
-                                    self.record_sl_hit(symbol, direction)
+                    # ── 3. STALE TRADE EXIT — DISABLED ──
+                    # Previously closed losing trades after N minutes.
+                    # Now we let the SL/TP and trailing stops handle all exits.
+                    # The bot only closes trades when they are in good profit
+                    # (via breakeven locks and trailing stops above).
+                    # Trades that go negative are left to recover or hit their SL naturally.
 
                 # Clean up tracking for closed positions
                 stale_ids = self._be_applied - active_ids
@@ -612,6 +627,11 @@ class ForexiaOrchestrator:
         Background loop that scans all configured pairs every 2 minutes
         and executes trades when auto_trade is ON and signals meet
         the minimum confidence threshold.
+        
+        Integrated with Gemini AI Advisor:
+        - Rule-based engine scans first (quick, pattern-based)
+        - If no rule-based signal fires, asks Gemini AI for trade signals
+        - Both paths route through risk manager for proper sizing
         """
         scan_interval = 120  # 120 seconds — gives trades room to develop
         logger.info("Auto-Scan Loop: Running every %d seconds", scan_interval)
@@ -623,14 +643,29 @@ class ForexiaOrchestrator:
                 if not self._settings.agent.auto_trade:
                     continue  # Bot was turned off, skip this cycle
 
-                # ── SESSION GATE: Only trade during London + NY (07:00-20:00 UTC) ──
-                utc_hour = datetime.utcnow().hour
-                if utc_hour < 7 or utc_hour >= 20:
-                    logger.debug("Auto-Scan: Outside London/NY window (07-20 UTC), skipping")
+                # ── SESSION GATE: Only skip weekends (Sat/Sun) ──
+                utc_now = datetime.utcnow()
+                if utc_now.weekday() >= 5:  # Saturday=5, Sunday=6
+                    logger.debug("Auto-Scan: Weekend — market closed, skipping")
                     continue
 
                 if not self.bridge or not self.bridge.is_connected:
-                    logger.warning("Auto-Scan: Broker disconnected, skipping cycle")
+                    # Attempt auto-reconnect
+                    logger.warning("Auto-Scan: Broker disconnected, attempting reconnect...")
+                    try:
+                        await self.bridge.connect(
+                            self._settings.broker.matchtrader_url,
+                            self._settings.broker.matchtrader_email,
+                            self._settings.broker.matchtrader_password,
+                        )
+                        if self.bridge.is_connected:
+                            logger.info("Auto-Scan: Broker reconnected successfully!")
+                        else:
+                            logger.warning("Auto-Scan: Reconnect failed, will retry next cycle")
+                            await asyncio.sleep(15)
+                    except Exception as re_err:
+                        logger.error(f"Auto-Scan: Reconnect error: {re_err}")
+                        await asyncio.sleep(15)
                     continue
 
                 pairs = self._settings.agent.pairs
@@ -639,6 +674,8 @@ class ForexiaOrchestrator:
 
                 signals_found = 0
                 trades_executed = 0
+                ai_signals_found = 0
+                ai_trades_executed = 0
 
                 # Refresh account state + open positions before scan cycle
                 try:
@@ -648,14 +685,21 @@ class ForexiaOrchestrator:
 
                 # Get current open positions to enforce 1-per-symbol limit
                 open_symbols = set()
+                open_positions = []
                 try:
-                    positions = await self.bridge.get_open_positions()
-                    for pos in positions:
+                    open_positions = await self.bridge.get_open_positions()
+                    for pos in open_positions:
                         sym = (pos.get("symbol") or "").rstrip(".")
                         if sym:
                             open_symbols.add(sym)
                 except Exception:
                     pass
+
+                # Session/weekly info for AI
+                session_phase_val = self.dialectic.get_current_phase(utc_now).value
+                weekly_act_val = self.weekly.get_current_act(utc_now).value
+                balance = getattr(self._account, "balance", 0)
+                equity = getattr(self._account, "equity", 0)
 
                 for symbol in pairs:
                     try:
@@ -671,60 +715,158 @@ class ForexiaOrchestrator:
                         if not self._is_pair_allowed_this_session(symbol):
                             continue
 
+                        # ── WIN-RATE GUARD 5: Pair blacklist (configurable from admin) ──
+                        if symbol in self._pair_blacklist:
+                            continue
+
+                        # ── WIN-RATE GUARD 6: TOXIC PAIR BAN (permanent) ──
+                        if symbol in self._toxic_pairs:
+                            logger.debug(f"[{symbol}] BLOCKED — toxic pair (negative historical expectancy)")
+                            continue
+
                         # ── WIN-RATE GUARD 4: Live spread check ──
+                        spread = 0
+                        bid = 0
+                        ask = 0
                         try:
                             price = await self.bridge.get_current_price(symbol)
-                            if price and price.get("spread", 99) > self._settings.risk.max_spread_pips:
-                                logger.debug(f"[{symbol}] Spread too wide: {price['spread']:.1f}p")
-                                continue
+                            if price:
+                                spread = price.get("spread", 0)
+                                bid = price.get("bid", 0)
+                                ask = price.get("ask", 0)
+                                if spread > self._settings.risk.max_spread_pips:
+                                    logger.debug(f"[{symbol}] Spread too wide: {spread:.1f}p")
+                                    continue
                         except Exception:
                             pass
 
+                        # ═══ STEP 1: Rule-based engine scan ═══
                         signal = await self.analyze(
                             symbol=symbol,
                             timeframe=timeframe,
                             force=True,  # Let confidence scoring decide — don't block on weekly gate
                         )
+                        executed_rule = False
                         if signal:
                             signals_found += 1
-                            if signal.confidence >= min_confidence:
+                            # BUY trades historically underperform — require slightly higher confidence
+                            effective_conf = min_confidence
+                            if signal.direction == TradeDirection.BUY:
+                                effective_conf = min(min_confidence + 0.05, 0.65)
+                            if signal.confidence >= effective_conf:
                                 trade = await self.execute_signal(signal)
                                 if trade and trade.status == TradeStatus.EXECUTED:
                                     trades_executed += 1
                                     open_symbols.add(symbol)  # Track newly opened
+                                    executed_rule = True
                                     logger.info(
-                                        f"Auto-Scan EXECUTED: {signal.direction.value} "
+                                        f"Auto-Scan EXECUTED (Rule): {signal.direction.value} "
                                         f"{signal.lot_size} {symbol} (conf: {signal.confidence:.0%})"
                                     )
+
+                        # ═══ STEP 2: Gemini AI Advisor scan (if no rule-based trade) ═══
+                        if not executed_rule and symbol not in open_symbols and self.gemini.is_enabled:
+                            try:
+                                # Get multi-TF candles for AI analysis
+                                candles = await self.bridge.get_candles(symbol, "M1", 100)
+                                m15_candles = await self.bridge.get_candles(symbol, "M15", 50) or []
+                                h1_candles = await self.bridge.get_candles(symbol, "H1", 24) or []
+                                if candles and len(candles) >= 20:
+                                    # First do AI analysis with multi-TF data
+                                    analysis = await self.gemini.analyze_pair(
+                                        symbol=symbol,
+                                        candles=candles,
+                                        session_phase=session_phase_val,
+                                        weekly_act=weekly_act_val,
+                                        account_balance=balance,
+                                        account_equity=equity,
+                                        open_positions=open_positions,
+                                        spread=spread,
+                                        m15_candles=m15_candles,
+                                        h1_candles=h1_candles,
+                                    )
+
+                                    # If AI sees opportunity, ask for a trade signal
+                                    if (analysis
+                                            and analysis.confidence >= 0.40
+                                            and spread <= self._settings.risk.max_spread_pips):
+                                        await asyncio.sleep(2)  # Rate limit pause
+                                        ai_signal = await self.gemini.generate_trade_signal(
+                                            symbol=symbol,
+                                            candles=candles,
+                                            session_phase=session_phase_val,
+                                            weekly_act=weekly_act_val,
+                                            account_balance=balance,
+                                            account_equity=equity,
+                                            open_positions=open_positions,
+                                            spread=spread,
+                                            bid=bid,
+                                            ask=ask,
+                                            m15_candles=m15_candles,
+                                            h1_candles=h1_candles,
+                                        )
+                                        if ai_signal:
+                                            ai_signals_found += 1
+                                            # BUY-side guard: require slightly higher AI confidence for BUY
+                                            ai_conf_ok = True
+                                            if ai_signal.action and ai_signal.action.upper() == "BUY":
+                                                buy_gate = min(min_confidence + 0.05, 0.65)
+                                                if ai_signal.confidence < buy_gate:
+                                                    ai_conf_ok = False
+                                                    logger.info(
+                                                        f"[BUY GATE] AI {symbol} BUY rejected — "
+                                                        f"conf {ai_signal.confidence:.0%} < {buy_gate:.0%}"
+                                                    )
+                                            if ai_conf_ok:
+                                                executed = await self.execute_ai_signal(ai_signal)
+                                                if executed:
+                                                    ai_trades_executed += 1
+                                                    open_symbols.add(symbol)
+                                                    logger.info(
+                                                        f"Auto-Scan EXECUTED (AI): {ai_signal.action} "
+                                                        f"{symbol} (conf: {ai_signal.confidence:.0%})"
+                                                    )
+                            except Exception as e:
+                                logger.error(f"Auto-Scan AI error for {symbol}: {e}")
+
                     except Exception as e:
                         logger.error(f"Auto-Scan error for {symbol}: {e}")
 
                 logger.info(
-                    f"Auto-Scan cycle — {len(pairs)} pairs scanned, "
-                    f"{signals_found} signals, {trades_executed} executed"
+                    f"Auto-Scan cycle — {len(pairs)} pairs scanned | "
+                    f"Rule: {signals_found} signals, {trades_executed} executed | "
+                    f"AI: {ai_signals_found} signals, {ai_trades_executed} executed"
                 )
 
-                # ── SL HIT DETECTION: Scan recent closures for stop-loss hits ──
+                # ── TRADE CLOSURE DETECTION: SL hits + winning resets ──
                 try:
                     closed = await self.bridge.get_trade_history()
                     recent_cutoff = datetime.utcnow() - timedelta(hours=4)
                     for t in closed:
                         reason = (t.get("close_reason") or "").lower()
                         close_time_str = t.get("close_time")
+                        try:
+                            ct = datetime.fromisoformat(
+                                close_time_str.replace("Z", "+00:00")
+                            ).replace(tzinfo=None)
+                            if ct <= recent_cutoff:
+                                continue
+                        except Exception:
+                            continue
                         if "sl" in reason or "stop" in reason:
-                            # Parse close_time to check recency
-                            try:
-                                ct = datetime.fromisoformat(
-                                    close_time_str.replace("Z", "+00:00")
-                                ).replace(tzinfo=None)
-                                if ct > recent_cutoff:
-                                    sym = (t.get("symbol") or "").rstrip(".")
-                                    direction = t.get("direction", "BUY")
-                                    self.record_sl_hit(sym, direction)
-                            except Exception:
-                                pass
+                            sym = (t.get("symbol") or "").rstrip(".")
+                            direction = t.get("direction", "BUY")
+                            self.record_sl_hit(sym, direction)
+                        elif "tp" in reason or "profit" in reason:
+                            # TP hit — streak broken, reset anti-tilt
+                            if self._consecutive_losses > 0:
+                                logger.info(
+                                    f"[ANTI-TILT] TP hit — resetting consecutive losses "
+                                    f"(was {self._consecutive_losses})"
+                                )
+                                self._consecutive_losses = 0
                 except Exception as e:
-                    logger.debug(f"SL monitor: {e}")
+                    logger.debug(f"Closure monitor: {e}")
 
             except asyncio.CancelledError:
                 break
@@ -987,7 +1129,7 @@ class ForexiaOrchestrator:
 
         # Get current spread
         price_data = await self.bridge.get_current_price(symbol) if self.bridge.is_connected else None
-        spread_pips = price_data.get("spread", 0) / 10 if price_data else 0
+        spread_pips = (price_data.get("spread") or 0) / 10 if price_data else 0
 
         # Build risk package
         risk_pkg = self.risk.build_risk_package(
@@ -997,6 +1139,7 @@ class ForexiaOrchestrator:
             stop_hunt_extreme=stop_hunt_extreme,
             symbol=symbol,
             spread_pips=spread_pips,
+            consecutive_losses=self._consecutive_losses,
         )
 
         if not risk_pkg:
@@ -1012,6 +1155,9 @@ class ForexiaOrchestrator:
             basket_confirmed=basket_confirmed,
             basket_confidence=basket_confidence,
         )
+
+        # Star pair boost — proven winners get +5% confidence
+        confidence = self._apply_star_pair_boost(symbol, confidence)
 
         signal = ForexiaSignal(
             signal_id=f"FX-{uuid.uuid4().hex[:8].upper()}",
@@ -1036,6 +1182,9 @@ class ForexiaOrchestrator:
         )
 
         self._active_signals.append(signal)
+        # Cap list to prevent unbounded memory growth
+        if len(self._active_signals) > 200:
+            self._active_signals = self._active_signals[-100:]
 
         logger.info(
             f"╔══════════════════════════════════════════════════════════╗\n"
@@ -1113,6 +1262,9 @@ class ForexiaOrchestrator:
                 executed_at=datetime.utcnow(),
             )
             self._trade_history.append(record)
+            # Cap trade history to prevent unbounded memory growth
+            if len(self._trade_history) > 500:
+                self._trade_history = self._trade_history[-250:]
             logger.info(
                 f"══╡ TRADE EXECUTED — Ticket #{ticket} ╞══\n"
                 f"    Signal: {signal.signal_id}\n"
@@ -1155,6 +1307,16 @@ class ForexiaOrchestrator:
         symbol = ai_signal.symbol
         direction = TradeDirection.BUY if ai_signal.action == "BUY" else TradeDirection.SELL
 
+        # ── SAFETY: Toxic pair ban ──
+        if symbol in self._toxic_pairs:
+            logger.info(f"[AI TRADE] {symbol} BLOCKED — toxic pair (negative expectancy)")
+            return False
+
+        # ── SAFETY: Dynamic blacklist ──
+        if symbol in self._pair_blacklist:
+            logger.info(f"[AI TRADE] {symbol} BLOCKED — pair is blacklisted")
+            return False
+
         # ── SAFETY: Check concurrent trade limit ──
         try:
             positions = await self.bridge.get_open_positions()
@@ -1174,10 +1336,10 @@ class ForexiaOrchestrator:
             logger.info(f"[AI TRADE] {symbol} is on SL cooldown, skipping")
             return False
 
-        # ── SESSION GATE: Only trade London + NY (07:00-20:00 UTC) ──
-        utc_hour = datetime.utcnow().hour
-        if utc_hour < 7 or utc_hour >= 20:
-            logger.info(f"[AI TRADE] Outside trading hours (07-20 UTC), skipping {symbol}")
+        # ── SESSION GATE: Only skip weekends ──
+        utc_now = datetime.utcnow()
+        if utc_now.weekday() >= 5:
+            logger.info(f"[AI TRADE] Weekend — market closed, skipping {symbol}")
             return False
 
         # ── Use risk manager for proper lot sizing ──
@@ -1194,25 +1356,41 @@ class ForexiaOrchestrator:
             stop_hunt_extreme=ai_signal.stop_loss,  # SL is behind this level
             symbol=symbol,
             spread_pips=0,
+            consecutive_losses=self._consecutive_losses,
         )
 
         if not risk_pkg:
             logger.warning(f"[AI TRADE] Risk validation FAILED for {symbol}")
             return False
 
-        # Override AI's SL/TP with fixed strategy: 20 pip SL, 80 pip TP
+        # ENFORCE FIXED SL/TP — 20 pip SL / 80 pip TP (regardless of AI suggestion)
+        # AI suggestions are ignored for SL/TP to ensure consistent risk management
         lot_size = risk_pkg["lot_size"]
-        pip_val = 0.01 if "JPY" in symbol else 0.0001
-        sl_distance = 20.0 * pip_val   # Fixed 20 pips
-        tp_distance = 80.0 * pip_val   # Fixed 80 pips
-        if direction == TradeDirection.BUY:
-            stop_loss = ai_signal.entry_price - sl_distance
-            take_profit = ai_signal.entry_price + tp_distance
+        s_upper = symbol.upper()
+        pip_val = 0.01 if ("JPY" in s_upper or "XAU" in s_upper or "GOLD" in s_upper) else 0.0001
+
+        # Fixed SL/TP per pair type
+        if "XAU" in s_upper or "GOLD" in s_upper:
+            sl_pips = 50.0   # Gold needs wider SL
+            tp_pips = 125.0  # Gold runs far
         else:
-            stop_loss = ai_signal.entry_price + sl_distance
-            take_profit = ai_signal.entry_price - tp_distance
-        stop_loss = round(stop_loss, 5)
-        take_profit = round(take_profit, 5)
+            sl_pips = 20.0   # Standard 20 pip SL
+            tp_pips = 80.0   # Standard 80 pip TP (4:1 R:R)
+
+        sl_distance = sl_pips * pip_val
+        tp_distance = tp_pips * pip_val
+
+        if direction == TradeDirection.BUY:
+            stop_loss = round(ai_signal.entry_price - sl_distance, 5)
+            take_profit = round(ai_signal.entry_price + tp_distance, 5)
+        else:
+            stop_loss = round(ai_signal.entry_price + sl_distance, 5)
+            take_profit = round(ai_signal.entry_price - tp_distance, 5)
+
+        logger.info(
+            f"[AI TRADE] {symbol} — Fixed SL/TP enforced: "
+            f"SL={sl_pips:.0f}p ({stop_loss:.5f}), TP={tp_pips:.0f}p ({take_profit:.5f})"
+        )
 
         # Build a ForexiaSignal for the existing execution pipeline
         signal = ForexiaSignal(
@@ -1232,6 +1410,9 @@ class ForexiaOrchestrator:
         )
 
         self._active_signals.append(signal)
+        # Cap list to prevent unbounded memory growth
+        if len(self._active_signals) > 200:
+            self._active_signals = self._active_signals[-100:]
 
         logger.info(
             f"╔══════════════════════════════════════════════════════════╗\n"
@@ -1269,6 +1450,9 @@ class ForexiaOrchestrator:
                 executed_at=datetime.utcnow(),
             )
             self._trade_history.append(record)
+            # Cap trade history to prevent unbounded memory growth
+            if len(self._trade_history) > 500:
+                self._trade_history = self._trade_history[-250:]
             logger.info(
                 f"══╡ 🤖 AI TRADE EXECUTED — Ticket #{ticket} ╞══\n"
                 f"    Signal: {signal.signal_id}\n"
@@ -1343,6 +1527,25 @@ class ForexiaOrchestrator:
         )
 
         return round(min(1.0, max(0.0, confidence)), 3)
+
+    def _apply_star_pair_boost(self, symbol: str, confidence: float) -> float:
+        """
+        Star pairs (proven winners) get a confidence boost.
+        GBPJPY: +$1152, USDJPY: +$736, EURJPY: +$171 — all 56-60% win rate.
+        Boost: +0.05 for star pairs (helps them pass gates more easily).
+        
+        Underperforming pairs get a penalty to require higher conviction:
+        EURUSD: 43% win rate → -0.05 penalty (needs higher base signal quality).
+        """
+        if symbol in self._star_pairs:
+            boosted = min(1.0, confidence + 0.05)
+            logger.info(f"[STAR PAIR] {symbol} confidence boosted: {confidence:.3f} → {boosted:.3f}")
+            return boosted
+        elif symbol == "EURUSD":
+            penalized = max(0.0, confidence - 0.05)
+            logger.info(f"[WEAK PAIR] {symbol} confidence penalized: {confidence:.3f} → {penalized:.3f}")
+            return penalized
+        return confidence
 
     # ─────────────────────────────────────────────────────────────────
     #  CANDLE COUNT CALCULATOR
@@ -1632,6 +1835,7 @@ class ForexiaOrchestrator:
         """
         Record that a trade on this symbol+direction hit stop loss.
         After 2 consecutive SL hits within 4 hours, block the pair for 2 hours.
+        Also track consecutive losses globally for anti-tilt lot sizing.
         """
         key = f"{symbol}:{direction}"
         now = datetime.utcnow()
@@ -1644,6 +1848,10 @@ class ForexiaOrchestrator:
         count += 1
         self._sl_cooldown[key] = (count, now)
 
+        # Track global consecutive losses for anti-tilt
+        self._consecutive_losses += 1
+        logger.info(f"[ANTI-TILT] Global consecutive losses: {self._consecutive_losses}")
+
         if count >= 2:
             logger.warning(
                 f"[WIN-RATE] {symbol} {direction} hit SL {count}x — "
@@ -1653,7 +1861,13 @@ class ForexiaOrchestrator:
     def _is_on_cooldown(self, symbol: str) -> bool:
         """Check if a symbol is in SL cooldown (any direction)."""
         now = datetime.utcnow()
+        expired_keys = []
+        result = False
         for key, (count, last_time) in self._sl_cooldown.items():
+            # Clean up entries older than 4 hours (fully expired)
+            if last_time and (now - last_time).total_seconds() > 14400:
+                expired_keys.append(key)
+                continue
             if not key.startswith(f"{symbol}:"):
                 continue
             if count < 2 or not last_time:
@@ -1665,8 +1879,11 @@ class ForexiaOrchestrator:
                     f"[WIN-RATE] {symbol} ON COOLDOWN — "
                     f"{count} SL hits, {7200 - elapsed:.0f}s remaining"
                 )
-                return True
-        return False
+                result = True
+        # Remove expired entries to prevent dict from growing indefinitely
+        for key in expired_keys:
+            self._sl_cooldown.pop(key, None)
+        return result
 
     def _is_pair_allowed_this_session(self, symbol: str) -> bool:
         """

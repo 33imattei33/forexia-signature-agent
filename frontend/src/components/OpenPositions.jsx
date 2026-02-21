@@ -26,10 +26,10 @@ export default function OpenPositions({ brokerConnected, refreshKey }) {
     }
   }, [brokerConnected]);
 
-  // Poll positions every 5 seconds
+  // Poll positions every 2 seconds — real-time P&L sync
   useEffect(() => {
     fetchPositions();
-    const interval = setInterval(fetchPositions, 5000);
+    const interval = setInterval(fetchPositions, 2000);
     return () => clearInterval(interval);
   }, [fetchPositions, refreshKey]);
 

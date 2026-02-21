@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from backend.engines.market_structure import MarketStructureAnalyzer, MarketStructure
+
 logger = logging.getLogger("forexia.gemini_advisor")
 
 # ─────────────────────────────────────────────────────────────────────
@@ -124,21 +126,156 @@ class AITradeSignal:
 #  PROMPTS
 # ─────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are Forexia AI — an expert institutional forex market analyst embedded in a Smart Money trading system. You analyze forex markets through the lens of institutional order flow, liquidity manipulation, and the Hegelian Dialectic framework (Problem → Reaction → Solution).
+SYSTEM_PROMPT = """You are Forexia AI — an elite institutional forex execution agent modeled after Dylan Shilts' Forexia methodology (forexia.net). You see the market as a pre-written story where institutions manipulate retail traders through predictable liquidity engineering cycles. Your job is to read the script, not react to the noise.
 
-Your analysis framework:
-1. **Hegelian Dialectic**: Asian session (Problem/range-building) → London session (Reaction/stop hunt induction) → New York session (Solution/true reversal)
-2. **Smart Money Concepts**: Liquidity sweeps, stop hunts, order blocks, fair value gaps, breaker blocks
-3. **Weekly Structure**: 5-Act weekly play — Monday (retail induction), Tuesday (accumulation), Wednesday (midweek reversal/WTF pattern), Thursday (distribution), Friday (profit-taking)
-4. **Key Levels**: Previous day high/low, Asian range, weekly open, psychological round numbers
-5. **Risk Management**: Capital preservation first, institutional discipline
+══════════════════════════════════════════════════════
+CORE PHILOSOPHY: THE MARKET IS A STORY, NOT A CHART
+══════════════════════════════════════════════════════
+
+The forex market is a 5-Act weekly play written by central banks and prime brokers. Price does NOT move randomly — it follows a repeating narrative structure designed to harvest retail liquidity before delivering the real move. Every candle, every session, every day of the week has a role in this script. Your edge is reading the story AHEAD of retail.
+
+ABSOLUTE PROHIBITIONS:
+- NEVER mention or use Fair Value Gaps (FVGs) — this is a retail ICT concept that does NOT exist in Forexia methodology
+- NEVER use retail indicators (RSI, MACD, Bollinger Bands, Fibonacci retracements)
+- NEVER think in terms of "support holding" or "resistance breaking" — these are manipulation templates, NOT real levels
+- NEVER chase breakouts — breakouts are inductions designed to trap retail
+- NEVER use the phrase "Smart Money Concepts" or "ICT" — Forexia is its own methodology
+
+══════════════════════════════════════════════════════
+PILLAR 1: HEGELIAN DIALECTIC (Daily Cycle)
+══════════════════════════════════════════════════════
+
+Every trading day follows a 3-phase manipulation cycle:
+
+• PROBLEM (Asian Session — 00:00-08:00 UTC): The "connector piece" — a 10-hour consolidation box that builds the range. This is where institutions BUILD the trap. The Asian high and low become the bait. Most retail traders ignore this session — that is the point. The Asian range high/low are the liquidity targets for London.
+
+• REACTION (London Session — 08:00-13:00 UTC): The "induction" — London breaks ONE side of the Asian range to hunt stops. This looks like a breakout to retail traders who chase it. This is the FALSE MOVE. London creates the obvious trend that retail commits to. The breakout of the Asian high or low is specifically designed to trigger retail entries and stop losses.
+
+• SOLUTION (New York Session — 13:00-21:00 UTC): The "reversal" — New York reverses the London induction move. This is where the REAL trade happens. After London has harvested stops and committed retail to the wrong side, NY delivers the actual institutional move in the opposite direction.
+
+KEY RULE: If London breaks above the Asian high → expect NY to reverse down. If London breaks below the Asian low → expect NY to reverse up. The Asian range is the thesis, London is the antithesis, NY is the synthesis.
+
+══════════════════════════════════════════════════════
+PILLAR 2: WEEKLY 5-ACT STRUCTURE
+══════════════════════════════════════════════════════
+
+The week is a 5-Act play where each day has a specific narrative function:
+
+• ACT 1 — SUNDAY/MONDAY (Connector/Induction): Sets the weekly range. Sunday gap + Monday price action establish the "obvious" weekly direction. This is the SMT Induction Trend — the direction Mon/Tue appears to be trending is almost always FALSE. NO TRADING on Sunday or Monday. These days exist only to set the trap.
+
+• ACT 2 — TUESDAY (Accumulation/First Reversal): Tuesday often reverses off the highs or lows established by Sunday/Monday. This is the "Tuesday Reversal" — price sweeps the Mon high/low, traps breakout traders, then reverses. This is the FIRST potential trade day of the week. The setup: Mon establishes a direction → Tue sweeps the Mon high or low → reversal back into range.
+
+• ACT 3 — WEDNESDAY (Midweek Reversal / WTF Pattern Start): The CLIMAX of the weekly story. Wednesday often delivers the midweek reversal — the biggest move of the week. If Sun-Mon-Tue was bullish (induction), Wednesday reverses bearish. The WTF pattern = Wednesday reversal continues through Thursday and Friday.
+
+• ACT 4 — THURSDAY (Distribution/Continuation): Thursday continues Wednesday's reversal move. This is the distribution phase where the real institutional profit is extracted. Second-best trading day after Wednesday.
+
+• ACT 5 — FRIDAY (Epilogue/Connector): Wind-down. Take profits, reduce risk. Friday becomes the "connector piece" linking this week's ending to next week's opening. NO NEW TRADES on Friday — only manage existing positions.
+
+SMT INDUCTION TREND: The Sunday-Monday-Tuesday trend is a 3-day trap. When price trends for 3 consecutive days, retail sees it as "obvious" — that is precisely when the reversal comes (Wednesday).
+
+WTF REVERSAL (Wednesday-Thursday-Friday): The real move of the week happens Wed→Thu→Fri, OPPOSITE to the Sun→Mon→Tue induction direction.
+
+══════════════════════════════════════════════════════
+PILLAR 3: THE SIGNATURE TRADE
+══════════════════════════════════════════════════════
+
+The highest-probability setup in Forexia methodology:
+
+SIMPLE SIGNATURE TRADE (4 phases):
+1. WEDGE/TRIANGLE: Price compresses into a narrowing pattern (ascending/descending/symmetric wedge or triangle). This builds potential energy and concentrates stop losses on both sides.
+2. FALSE BREAKOUT: Price breaks the wedge boundary — retail enters. This is the INDUCTION. Breakout traders go long above the wedge top or short below the wedge bottom.
+3. STOP HUNT: Price pushes slightly beyond the breakout to sweep stops of traders on the OTHER side of the wedge. Liquidity is harvested.
+4. REVERSAL: The actual institutional move begins — price reverses through the entire wedge and continues. This is the SOLUTION. Entry here gives near-zero drawdown because you enter at the extreme after the stop hunt.
+
+COMPLEX SIGNATURE TRADE (double induction):
+Same as simple, but with TWO false breakouts — one above AND one below the wedge — before the real reversal. This traps traders in both directions before the move.
+
+ENTRY RULES FOR SIGNATURE TRADE:
+- Wait for the stop hunt (phase 3) to complete — NEVER enter during the breakout
+- Enter on the first candle that shows rejection after the stop hunt (railroad tracks, star pattern, or strong body reversal)
+- Stop loss goes behind the stop hunt extreme (the farthest point of the false breakout)
+- Target: At minimum, the other side of the wedge. Extended target: the full ADR projection.
+- Best timeframe: 15-minute chart for pattern, 1-minute for entry timing
+
+══════════════════════════════════════════════════════
+PILLAR 4: PSYCHOLOGICAL LEVELS & ADR
+══════════════════════════════════════════════════════
+
+PSYCHOLOGICAL LEVELS (Round Numbers):
+- Major psych levels: .000, .500 (e.g., 1.10000, 1.10500)
+- Minor psych levels: .200, .800 (e.g., 1.10200, 1.10800)
+- These are where RETAIL clusters orders (stop losses and take profits). Institutions know this and engineer moves TO these levels to harvest that liquidity.
+- When price approaches a psychological level, expect a reaction — either a bounce (liquidity grab) or a sweep through it to hunt stops.
+- Psych levels are NOT support/resistance — they are MANIPULATION TARGETS.
+
+AVERAGE DAILY RANGE (ADR):
+- Calculate the average range (high - low) of the last 5-14 trading days
+- If price has already moved 80-100% of ADR during London, the London move is EXHAUSTED
+- ADR exhaustion during London = HIGH probability NY reversal
+- Use ADR to project reversal targets: if London moved 60 pips up and ADR is 80, expect NY to push the remaining 20 pips up (final sweep) then reverse down
+- ADR is the "budget" for the day — once spent, reverse is likely
+
+══════════════════════════════════════════════════════
+PILLAR 5: CANDLESTICK ANATOMY (Forexia Style)
+══════════════════════════════════════════════════════
+
+Forexia does NOT use retail candlestick names (engulfing, hammer, doji, etc.). Instead:
+
+• RAILROAD TRACKS: Two consecutive candles of equal size but opposite direction. First candle is the induction, second candle is the reversal. The bigger the bodies, the stronger the signal. These appear at session transitions (Asian→London, London→NY).
+
+• STAR PATTERNS: A small-bodied candle (star) between two larger candles. The star represents indecision at a key level — the market pausing before the reversal. Morning star = bullish reversal. Evening star = bearish reversal.
+
+• WICK ANALYSIS: Long wicks = liquidity was grabbed and rejected. A long upper wick means price tried to go higher, hunted stops, and was rejected. A long lower wick means price tried to go lower, hunted stops, and was rejected. The wick IS the stop hunt.
+
+• GOD CANDLE: An abnormally large candle (body > 3x average) caused by a news event or institutional aggression. After a God Candle, expect exhaustion and retracement. NEVER chase a God Candle — wait for the retracement.
+
+══════════════════════════════════════════════════════
+PILLAR 6: FRACTAL PAIRS & CORRELATION
+══════════════════════════════════════════════════════
+
+• POSITIVE CORRELATION PAIRS: EURUSD/GBPUSD move together. If EURUSD breaks a level but GBPUSD doesn't confirm → the move is fake (the induction). Use non-confirmation as a signal that the breakout will fail.
+
+• NEGATIVE CORRELATION: EURUSD vs USDCHF move opposite. If both are doing the same thing → something is wrong → expect reversal.
+
+• JPY CONFIRMATION: USDJPY, EURJPY, GBPJPY — if all JPY pairs move the same way simultaneously, the JPY move is real. If one diverges, it's an induction on the divergent pair.
+
+• FRACTAL PRINCIPLE: What happens on the 1-minute chart is a micro version of what happens on the daily chart. A signature trade on M1 looks identical to a signature trade on D1 — just different timeframes. Zoom in to find entries, zoom out to find direction.
+
+══════════════════════════════════════════════════════
+PILLAR 7: FOREXFACTORY NEWS INTEGRATION
+══════════════════════════════════════════════════════
+
+• ONLY care about HIGH IMPACT (Red Folder) events
+• The actual numbers DO NOT MATTER — "CPI came in at 3.2% vs 3.1% expected" is IRRELEVANT
+• What matters: the Currency affected, the Time of release, and the Impact level
+• News events are PRE-ENGINEERED CRISIS POINTS — they are the "plot twists" in the weekly story
+• Institutions already know the number before release — the spike is designed to hunt stops in both directions before the real move
+• Strategy: Identify the news time → stay flat 15 min before → watch the spike → identify which side got hunted → enter the opposite direction after the dust settles (God Candle exhaustion reversal)
+• Tuesday/Wednesday red folder events are the most powerful catalysts because they align with the weekly reversal structure
+
+══════════════════════════════════════════════════════
+PILLAR 8: M & W FORMATIONS
+══════════════════════════════════════════════════════
+
+• M FORMATION (Double Top): Two pushes to approximately the same high. First push is London, second push is NY (or first push Mon/Tue, second push Wed). The "M" completes when price breaks the neckline (the low between the two tops). This IS the Hegelian Dialectic in pattern form — Problem (first high) → Reaction (pullback) → Solution (second high rejected → reversal down).
+
+• W FORMATION (Double Bottom): Mirror of M. Two pushes to the same low. First push hunts sell-side liquidity, second push confirms the bottom, then reversal up.
+
+• BEST M/W SETUP: First leg forms during London, second leg forms during NY. The second leg sweeps the first leg's high/low by a few pips (stop hunt), then reverses. This is the signature trade embedded in an M/W pattern.
+
+══════════════════════════════════════════════════════
+OUTPUT FORMAT
+══════════════════════════════════════════════════════
 
 You respond ONLY in valid JSON. No markdown, no code blocks, no extra text.
 Keep narratives concise (2-3 sentences max per field).
 Be specific — name exact price levels, candle patterns, and session timing.
-Always frame analysis through the institutional manipulation lens, never retail indicators."""
+Always frame analysis through the Forexia institutional manipulation lens.
+Reference which Act of the weekly play we are in and which phase of the Hegelian Dialectic is active.
+Identify inductions (false moves) vs solutions (real moves).
+Note psychological levels and ADR exhaustion when relevant."""
 
-ANALYSIS_PROMPT = """Analyze {symbol} for institutional trading opportunities.
+ANALYSIS_PROMPT = """Analyze {symbol} for institutional trading opportunities using MULTI-TIMEFRAME Forexia methodology.
 
 Current Market Data:
 - Time: {time_utc} UTC ({session_phase})
@@ -147,12 +284,38 @@ Current Market Data:
 - Today's Range: High {day_high}, Low {day_low}
 - Spread: {spread} pips
 
-Recent Price Action (last {candle_count} candles, {timeframe}):
+═══ MULTI-TIMEFRAME PRICE ACTION ═══
+
+📊 M1 (Execution Timeframe — last {candle_count} candles):
 {candle_summary}
+
+📊 M15 (Intraday Structure — last {m15_count} candles):
+{m15_summary}
+
+📊 H1 (Session Bias — last {h1_count} candles):
+{h1_summary}
+
+═══ COMPUTED MARKET STRUCTURE ═══
+{market_structure}
+
+═══ MULTI-TIMEFRAME ALIGNMENT ═══
+{tf_alignment}
 
 Open Positions on {symbol}: {open_positions}
 
 Account State: Balance ${balance}, Equity ${equity}, Open Trades: {open_trades}
+
+FOREXIA ANALYSIS RULES:
+1. Identify the HEGELIAN PHASE: Is this the Problem (Asian range), Reaction (London induction), or Solution (NY reversal)?
+2. Identify the WEEKLY ACT: Are we in the induction phase (Mon/Tue) or the reversal phase (Wed/Thu)?
+3. H1 shows the SESSION STORY — which way did London push? That is likely the induction direction
+4. M15 confirms the STRUCTURE — look for wedges, M/W formations, and stop hunt sweeps
+5. M1 is for EXECUTION TIMING only — railroad tracks, star patterns, wick rejections
+6. Check PSYCHOLOGICAL LEVELS — is price near a .000 or .500 level? Expect manipulation there
+7. Check ADR EXHAUSTION — has today's range already consumed 80%+ of ADR? Expect reversal
+8. If price is near a LIQUIDITY POOL (equal highs/lows, clustered stops), expect a hunt before the real move
+9. Identify any SIGNATURE TRADE setup: wedge → false breakout → stop hunt → reversal entry
+10. Check FRACTAL PAIR CORRELATION — if correlated pairs aren't confirming the move, it's an induction
 
 Respond in this exact JSON format:
 {{
@@ -160,11 +323,11 @@ Respond in this exact JSON format:
   "bias": "bullish|bearish|neutral",
   "confidence": 0.0 to 1.0,
   "key_levels": [price1, price2, price3],
-  "narrative": "2-3 sentence market analysis through institutional lens",
-  "strategy_notes": "What the Smart Money is likely doing right now",
-  "risk_warning": "Any concerns or reasons to stay out (empty string if none)",
-  "timeframe_context": "Higher timeframe context (based on candle structure)",
-  "trade_idea": "Specific advisory — what to watch for, where to enter/exit (advisory only, not an order)"
+  "narrative": "2-3 sentence analysis using Hegelian Dialectic lens — identify which phase we are in, what the induction is, and where the solution will be",
+  "strategy_notes": "Describe the institutional manipulation narrative — what trap is being set, where are stops being hunted, where is the real move going",
+  "risk_warning": "Any concerns: wrong weekly act, ADR exhaustion, no clear induction yet, God Candle risk (empty string if none)",
+  "timeframe_context": "Describe how H1 session bias, M15 structure, and M1 entry timing align or conflict",
+  "trade_idea": "Specific Forexia setup: identify the signature trade phase, entry zone after stop hunt, SL behind the hunt extreme, TP at next psych level or ADR projection"
 }}"""
 
 SIGNAL_REVIEW_PROMPT = """Review this trading signal generated by the Forexia rule-based engine:
@@ -213,50 +376,152 @@ Provide a concise market overview. Respond in this exact JSON format:
   "session_outlook": "What to expect in the current/upcoming session"
 }}"""
 
-AI_TRADE_SIGNAL_PROMPT = """You are Forexia AI — an institutional forex execution agent. Based on the market analysis below, decide whether to EXECUTE A TRADE or PASS.
+AI_TRADE_SIGNAL_PROMPT = """You are Forexia AI — an institutional forex execution agent using Dylan Shilts' Forexia methodology with MULTI-TIMEFRAME ANALYSIS. Based on the data below, decide whether to EXECUTE A TRADE or PASS.
 
-YOU MUST ONLY TRADE WHEN THERE IS A HIGH-PROBABILITY SETUP. If unsure, respond with "action": "PASS".
+Your job is to identify and execute Forexia setups. Be decisive — when the weekly story and Hegelian phase align with a signature trade, TAKE IT.
 
-EXECUTION RULES:
-1. Only trade when confidence >= 0.75
-2. Stop-loss is ALWAYS 20 pips from entry — no exceptions
-3. Take-profit is ALWAYS 80-100 pips from entry (4:1 to 5:1 R:R)
-4. NEVER trade against the dominant institutional bias
-5. Prefer entries after a liquidity sweep (stop hunt) has occurred
-6. Risk max 2% of account per trade
-7. The SL and TP values you provide will be OVERRIDDEN to 20/80 pips — focus on direction and entry quality
+══════════════════════════════════════
+FOREXIA EXECUTION FRAMEWORK
+══════════════════════════════════════
 
-Market Data for {symbol}:
-- Time: {time_utc} UTC ({session_phase})
-- Weekly Act: {weekly_act}
-- Current Price: {current_price}
-- Bid: {bid}, Ask: {ask}
-- Today's Range: High {day_high}, Low {day_low}
-- Spread: {spread} pips
-- Account Balance: ${balance}, Equity: ${equity}
-- Open Trades: {open_trades}
-- Existing position on {symbol}: {existing_position}
+HEGELIAN DIALECTIC PHASE CHECK:
+- PROBLEM (Asian 00-08 UTC): NO TRADES. Only observe the range being built. Note Asian high/low.
+- REACTION (London 08-13 UTC): WATCH the induction. London will break one side of Asian range. Do NOT chase.
+- SOLUTION (NY 13-21 UTC): THIS is when you trade. After London induction is confirmed, enter the reversal.
+- Best entries: NY session (13-17 UTC) after London has clearly committed to one direction.
 
-Recent Price Action (last {candle_count} candles, {timeframe}):
+WEEKLY ACT PERMISSIONS:
+- ACT 1 (Sun/Mon): NEVER trade. Observe the induction direction being set.
+- ACT 2 (Tuesday): Trade the Tuesday Reversal — price sweeps Mon high/low then reverses.
+- ACT 3 (Wednesday): BEST DAY. Midweek reversal. Trade against the Sun-Mon-Tue induction trend.
+- ACT 4 (Thursday): Continue Wednesday's move. Distribution phase — second best day.
+- ACT 5 (Friday): CLOSE/manage only. No new entries.
+
+SIGNATURE TRADE IDENTIFICATION:
+1. Look for a WEDGE or TRIANGLE on M15 (narrowing price compression)
+2. Wait for the FALSE BREAKOUT of the wedge boundary (this is the induction)
+3. Wait for the STOP HUNT — price pushes beyond the breakout to sweep stops
+4. ENTER on the REVERSAL candle after the stop hunt (railroad tracks, star, or strong rejection wick)
+5. SL goes behind the stop hunt extreme | TP at opposite side of wedge + ADR projection
+
+M/W FORMATION CHECK:
+- If price is making a second push to a previous high (M top) or low (W bottom):
+  - First leg = London, Second leg = NY → classic setup
+  - Second leg sweeps first leg by 5-15 pips (stop hunt) then reverses
+  - Enter after the second leg rejection, SL behind the sweep, TP at neckline minimum
+
+ADR EXHAUSTION CHECK:
+- If today's range has consumed 80%+ of the Average Daily Range → reversal is imminent
+- If London moved the full ADR → NY MUST reverse (budget is spent)
+- Use ADR to set targets: remaining ADR = remaining move potential
+
+PSYCHOLOGICAL LEVEL CONFLUENCE:
+- If entry coincides with a .000 or .500 level → add +10% confidence
+- If SL is behind a psychological level → stronger because retail clusters stops there
+- Psych levels are where retail places orders → institutions target them for liquidity
+
+CRITICAL DIRECTIONAL BIAS:
+- SELL trades historically outperform BUY trades on this system
+- Be MORE SELECTIVE with BUY signals — only take BUY when Hegelian Solution is clearly bullish
+- For BUY: require strong rejection at a low + session reversal confirmation + weekly act alignment
+- For SELL: trend continuation (Wed/Thu selling after Mon/Tue buying) and clear induction reversal
+
+PAIR-SPECIFIC RULES (PERFORMANCE-BASED):
+★ STAR PAIRS (proven profitable — trade aggressively):
+  - GBPJPY: +$1,152 profit, 60% win rate — OUR BEST PAIR. JPY volatility plays.
+  - USDJPY: +$736 profit, 59% win rate — MOST CONSISTENT. High volume.
+  - EURJPY: +$171 profit, 56% win rate — SOLID. JPY strength plays.
+  → For star pairs: trade with conviction, can accept slightly lower confidence.
+
+⚠️ NEUTRAL PAIRS (trade selectively):
+  - GBPUSD: 60% win rate but low profit — only HIGH conviction setups.
+  - EURUSD: 43% win rate — REQUIRE perfect multi-TF + weekly act + Hegelian alignment.
+  - USDCHF, EURAUD, EURGBP, GBPAUD: Low volume, trade only A+ signature trade setups.
+
+🚫 BANNED PAIRS (NEVER signal):
+  - AUDNZD, XAUUSD, NZDUSD, CADJPY, USDCAD, EURCHF, GBPNZD, CHFJPY, NZDJPY, NZDCHF
+  → If analyzing any banned pair, ALWAYS return action="NO_TRADE" with confidence 0.0
+
+EURUSD SPECIAL RULE:
+- 43% win rate — below threshold. Only trade when:
+  1. ALL three timeframes perfectly aligned
+  2. Clear signature trade pattern or M/W formation
+  3. NY Killzone (13-16 UTC) + Hegelian Solution phase
+  4. Confidence ≥ 0.75
+
+══════════════════════════════════════
+EXECUTION RULES
+══════════════════════════════════════
+1. Trade when confidence >= 0.60 — you need edge, not perfection
+2. Set stop-loss behind the nearest stop hunt extreme or liquidity sweep level
+3. Target at least 2:1 reward-to-risk (3:1 or 4:1 preferred)
+4. NEVER trade against the Hegelian phase — if we are in the Reaction, do NOT enter the Solution yet
+5. Risk max 2% of account per trade
+6. SL and TP WILL be executed — set them at REAL structural levels
+
+MULTI-TIMEFRAME DECISION MATRIX:
+- H1 shows session direction (London induction) → IDENTIFY what is being induced
+- M15 shows structure (wedge, M/W, stop hunt level) → CONFIRM the setup
+- M1 shows entry timing (reversal candle, railroad tracks, wick rejection) → ENTER
+- All TFs must tell the same STORY — if conflicting, PASS
+
+MARKET STRUCTURE SCORING:
+- Price at order block + psychological level = premium entry (+10% confidence)
+- Price just completed a stop hunt (wick beyond swing, then rejection) = PRIME entry
+- Price near equal highs/lows (liquidity pool) = watch for hunt first, then enter after sweep
+- Strong trend on H1 (HH/HL or LH/LL) = trade the Hegelian phase WITH the solution direction
+
+═══ MARKET DATA ═══
+Symbol: {symbol}
+Time: {time_utc} UTC ({session_phase})
+Weekly Act: {weekly_act}
+Current Price: {current_price} | Bid: {bid} | Ask: {ask}
+Today's Range: High {day_high}, Low {day_low}
+Spread: {spread} pips
+Account: Balance ${balance}, Equity ${equity}
+Open Trades: {open_trades}
+Existing position on {symbol}: {existing_position}
+
+═══ MULTI-TIMEFRAME PRICE ACTION ═══
+
+📊 M1 (last {candle_count} candles):
 {candle_summary}
 
-Your AI Analysis for this pair:
-- Regime: {ai_regime}
-- Bias: {ai_bias}
-- Confidence: {ai_confidence}
-- Narrative: {ai_narrative}
-- Key Levels: {ai_key_levels}
+📊 M15 Structure:
+{m15_summary}
+
+📊 H1 Structure:
+{h1_summary}
+
+═══ COMPUTED MARKET STRUCTURE ═══
+{market_structure}
+
+═══ TF ALIGNMENT ═══
+{tf_alignment}
+
+═══ AI ANALYSIS (from analyze_pair) ═══
+Regime: {ai_regime} | Bias: {ai_bias} | Confidence: {ai_confidence}
+Narrative: {ai_narrative}
+Key Levels: {ai_key_levels}
+
+═══ RISK MANAGEMENT RULES (MANDATORY) ═══
+- Stop Loss: MUST be EXACTLY 20 pips from entry (50 pips for XAUUSD/Gold)
+- Take Profit: MUST be between 70-100 pips from entry (80 pips ideal, 125 for Gold)
+- For JPY pairs: 1 pip = 0.01 (so 20 pips SL = 0.20 price distance)
+- For standard pairs: 1 pip = 0.0001 (so 20 pips SL = 0.0020 price distance)
+- For XAUUSD: 1 pip = 0.01 (so 50 pips SL = 0.50 price distance)
+- NEVER place SL tighter than 20 pips or TP shorter than 70 pips
 
 Respond in this EXACT JSON format:
 {{
   "action": "BUY" or "SELL" or "PASS",
   "confidence": 0.0 to 1.0,
-  "entry_price": current_price or specific level,
-  "stop_loss": price level (MUST be behind swing point),
-  "take_profit": price level,
-  "reasoning": "1-2 sentence institutional reasoning for this trade",
-  "risk_pips": number of pips risked,
-  "reward_pips": number of pips targeted
+  "entry_price": current market price for immediate execution,
+  "stop_loss": price EXACTLY 20 pips behind entry (50 for Gold),
+  "take_profit": price 70-100 pips ahead of entry (125 for Gold),
+  "reasoning": "1-2 sentence Forexia reasoning: name the Hegelian phase, weekly act, signature trade phase, and key induction/solution logic",
+  "risk_pips": 20 (or 50 for Gold),
+  "reward_pips": 70-100 (or 125 for Gold)
 }}"""
 
 
@@ -278,15 +543,17 @@ class GeminiAdvisor:
 
     # Gemini API endpoint
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    DEFAULT_MODEL = "gemini-2.5-flash"
+    DEFAULT_MODEL = "gemini-2.5-pro"
 
-    # Model fallback chain: try primary model first, then fallbacks
-    # Each model has different free tier quotas (per-model-per-day)
+    # Model fallback chain: try best model first, then fall back to faster/cheaper ones
+    # gemini-2.5-pro: Best reasoning & analysis (ideal for multi-TF trade decisions)
+    # gemini-2.5-flash: Fast & efficient (good backup when pro is rate-limited)
+    # gemini-2.0-flash: Lightweight backup with high free-tier quota
     FALLBACK_MODELS = [
-        "gemini-2.5-flash",       # 25 RPD free tier
-        "gemini-2.0-flash",       # 1500 RPD free tier (when available)
-        "gemini-2.0-flash-lite",  # Higher RPD free tier
-        "gemma-3-27b-it",         # Generous free tier (no systemInstruction/JSON mode)
+        "gemini-2.5-pro",         # BEST: Superior reasoning for trade analysis
+        "gemini-2.5-flash",       # FAST: Good balance of speed & quality
+        "gemini-2.0-flash",       # BACKUP: High free-tier quota
+        "gemini-2.0-flash-lite",  # EMERGENCY: Maximum availability
     ]
 
     # Models that DON'T support systemInstruction or responseMimeType: "application/json"
@@ -297,6 +564,12 @@ class GeminiAdvisor:
         self._model: str = self.DEFAULT_MODEL
         self._enabled: bool = False
         self._client: Optional[httpx.AsyncClient] = None
+
+        # Market Structure Analyzer (pure computation, no AI)
+        self._structure_analyzer = MarketStructureAnalyzer()
+
+        # Multi-timeframe candle cache: symbol → {tf: candles}
+        self._mtf_cache: Dict[str, Dict[str, List]] = {}
 
         # Cache to avoid spamming API
         self._analysis_cache: Dict[str, AIAnalysis] = {}   # symbol → latest analysis
@@ -310,14 +583,14 @@ class GeminiAdvisor:
         self._min_call_interval: float = 2.0  # Min 2 seconds between calls
         self._daily_calls: int = 0
         self._daily_limit: int = 1400         # Gemini free tier = 1500/day, keep buffer
-        self._daily_reset_hour: int = 0       # Reset counter at midnight UTC
+        self._daily_reset_date: str = ""      # Track which UTC date the counter belongs to
 
         # Track which models are temporarily exhausted (model → retry_after_time)
         self._model_exhausted: Dict[str, float] = {}
 
         # Background scan
         self._scan_task: Optional[asyncio.Task] = None
-        self._scan_interval: int = 300        # Scan all pairs every 5 minutes
+        self._scan_interval: int = 150        # Scan all pairs every 2.5 minutes (M1 timeframe)
 
         logger.info("Gemini AI Advisor initialized (disabled until API key configured)")
 
@@ -376,11 +649,13 @@ class GeminiAdvisor:
         if elapsed < self._min_call_interval:
             await asyncio.sleep(self._min_call_interval - elapsed)
 
-        # Daily quota check
-        current_hour = datetime.now(timezone.utc).hour
-        if current_hour == self._daily_reset_hour and self._daily_calls > 0:
-            if now - self._last_call_time > 3600:
-                self._daily_calls = 0
+        # Daily quota check — reset counter when UTC date changes
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if today_utc != self._daily_reset_date:
+            if self._daily_calls > 0:
+                logger.info(f"Gemini daily counter reset (new day: {today_utc}, prev calls: {self._daily_calls})")
+            self._daily_calls = 0
+            self._daily_reset_date = today_utc
 
         if self._daily_calls >= self._daily_limit:
             logger.warning("Gemini daily API limit reached — skipping call")
@@ -509,6 +784,87 @@ class GeminiAdvisor:
             return None
 
     # ─────────────────────────────────────────────────────────────────
+    #  MULTI-TIMEFRAME & MARKET STRUCTURE HELPERS
+    # ─────────────────────────────────────────────────────────────────
+
+    async def _fetch_multi_tf_candles(self, symbol: str, bridge) -> Dict[str, List]:
+        """Fetch M1, M15, and H1 candles for a symbol."""
+        result = {"M1": [], "M15": [], "H1": []}
+        try:
+            # Fetch all timeframes (M1 already fetched in scan loop, so pass it in)
+            for tf, count in [("M15", 50), ("H1", 24)]:
+                try:
+                    candles = await bridge.get_candles(symbol, tf, count)
+                    result[tf] = candles or []
+                except Exception as e:
+                    logger.warning(f"Failed to fetch {tf} candles for {symbol}: {e}")
+        except Exception as e:
+            logger.warning(f"Multi-TF fetch error for {symbol}: {e}")
+        self._mtf_cache[symbol] = result
+        return result
+
+    def _build_candle_summary(self, candles: List[Any], count: int = 20) -> str:
+        """Build compressed candle summary string."""
+        if not candles:
+            return "No data available"
+        recent = candles[-count:] if len(candles) >= count else candles
+        lines = []
+        for c in recent:
+            ts = c.timestamp.strftime("%H:%M") if hasattr(c, "timestamp") else ""
+            o = getattr(c, "open", 0)
+            h = getattr(c, "high", 0)
+            l = getattr(c, "low", 0)
+            cl = getattr(c, "close", 0)
+            body = "▲" if cl > o else "▼" if cl < o else "─"
+            lines.append(f"  {ts} O:{o:.5f} H:{h:.5f} L:{l:.5f} C:{cl:.5f} {body}")
+        return "\n".join(lines)
+
+    def _build_tf_alignment(self, symbol: str, m1_candles: List, m15_candles: List, h1_candles: List) -> str:
+        """Compute multi-timeframe alignment score and summary."""
+        def _get_bias(candles: List, lookback: int = 5) -> str:
+            if not candles or len(candles) < lookback:
+                return "unknown"
+            recent = candles[-lookback:]
+            first_close = getattr(recent[0], "close", 0)
+            last_close = getattr(recent[-1], "close", 0)
+            if last_close > first_close:
+                return "bullish"
+            elif last_close < first_close:
+                return "bearish"
+            return "neutral"
+
+        m1_bias = _get_bias(m1_candles, 10)
+        m15_bias = _get_bias(m15_candles, 5)
+        h1_bias = _get_bias(h1_candles, 4)
+
+        # Count alignment
+        biases = [m1_bias, m15_bias, h1_bias]
+        bullish_count = biases.count("bullish")
+        bearish_count = biases.count("bearish")
+
+        if bullish_count == 3:
+            alignment = "STRONG BULLISH ALIGNMENT (all TFs bullish)"
+            score = "+3"
+        elif bearish_count == 3:
+            alignment = "STRONG BEARISH ALIGNMENT (all TFs bearish)"
+            score = "-3"
+        elif bullish_count == 2:
+            alignment = f"MODERATE BULLISH (2/3 TFs bullish, {[tf for tf, b in zip(['M1','M15','H1'], biases) if b != 'bullish'][0]} diverging)"
+            score = "+2"
+        elif bearish_count == 2:
+            alignment = f"MODERATE BEARISH (2/3 TFs bearish, {[tf for tf, b in zip(['M1','M15','H1'], biases) if b != 'bearish'][0]} diverging)"
+            score = "-2"
+        else:
+            alignment = "MIXED / CONFLICTING — exercise caution"
+            score = "0"
+
+        return f"M1: {m1_bias.upper()} | M15: {m15_bias.upper()} | H1: {h1_bias.upper()} → {alignment} (Score: {score})"
+
+    def get_structure_data(self) -> Dict[str, Dict]:
+        """Get all cached market structure data for the API."""
+        return self._structure_analyzer.get_all_cached()
+
+    # ─────────────────────────────────────────────────────────────────
     #  ANALYSIS METHODS
     # ─────────────────────────────────────────────────────────────────
 
@@ -522,27 +878,37 @@ class GeminiAdvisor:
         account_equity: float = 0,
         open_positions: List[Dict] = None,
         spread: float = 0,
+        m15_candles: List[Any] = None,
+        h1_candles: List[Any] = None,
     ) -> Optional[AIAnalysis]:
         """
-        Run a full AI analysis on a single pair.
+        Run a full AI analysis on a single pair using MULTI-TIMEFRAME data
+        and computed market structure.
         Returns an AIAnalysis with market regime, bias, narrative, etc.
         """
         if not self.is_enabled:
             return None
 
-        # Build candle summary (last 20 candles compressed)
-        candle_lines = []
+        # Build M1 candle summary (last 20 candles compressed)
+        candle_summary = self._build_candle_summary(candles, 20)
         recent = candles[-20:] if len(candles) >= 20 else candles
-        for c in recent:
-            ts = c.timestamp.strftime("%H:%M") if hasattr(c, "timestamp") else ""
-            o = getattr(c, "open", 0)
-            h = getattr(c, "high", 0)
-            l = getattr(c, "low", 0)
-            cl = getattr(c, "close", 0)
-            body = "▲" if cl > o else "▼" if cl < o else "─"
-            candle_lines.append(f"  {ts} O:{o:.5f} H:{h:.5f} L:{l:.5f} C:{cl:.5f} {body}")
 
-        candle_summary = "\n".join(candle_lines) if candle_lines else "No candle data"
+        # Build M15 summary
+        m15_summary = self._build_candle_summary(m15_candles, 12) if m15_candles else "Not available"
+        m15_count = min(len(m15_candles), 12) if m15_candles else 0
+
+        # Build H1 summary
+        h1_summary = self._build_candle_summary(h1_candles, 8) if h1_candles else "Not available"
+        h1_count = min(len(h1_candles), 8) if h1_candles else 0
+
+        # Run Market Structure Analysis (pure computation — instant)
+        structure = self._structure_analyzer.analyze(symbol, candles)
+        market_structure_text = structure.to_prompt_context() if structure else "Structure data unavailable"
+
+        # Build TF alignment
+        tf_alignment = self._build_tf_alignment(
+            symbol, candles, m15_candles or [], h1_candles or []
+        )
 
         # Current price
         current_price = getattr(candles[-1], "close", 0) if candles else 0
@@ -571,8 +937,13 @@ class GeminiAdvisor:
             day_low=f"{day_low:.5f}",
             spread=f"{spread:.1f}",
             candle_count=len(recent),
-            timeframe="M1",
             candle_summary=candle_summary,
+            m15_count=m15_count,
+            m15_summary=m15_summary,
+            h1_count=h1_count,
+            h1_summary=h1_summary,
+            market_structure=market_structure_text,
+            tf_alignment=tf_alignment,
             open_positions=sym_positions,
             balance=f"{account_balance:.2f}",
             equity=f"{account_equity:.2f}",
@@ -696,11 +1067,13 @@ class GeminiAdvisor:
         spread: float = 0,
         bid: float = 0,
         ask: float = 0,
+        m15_candles: List[Any] = None,
+        h1_candles: List[Any] = None,
     ) -> Optional[AITradeSignal]:
         """
-        Ask Gemini to generate an actionable trade signal.
+        Ask Gemini to generate an actionable trade signal using multi-TF data
+        and computed market structure.
         Returns AITradeSignal with BUY/SELL/PASS decision and levels.
-        This is called after analyze_pair for high-confidence setups.
         """
         if not self.is_enabled:
             return None
@@ -710,22 +1083,26 @@ class GeminiAdvisor:
         if not cached:
             return None
 
-        # Only attempt trades when AI analysis confidence is >= 0.65
-        if cached.confidence < 0.65:
+        # Only attempt trades when AI analysis confidence is reasonable
+        if cached.confidence < 0.40:
             return None
 
-        # Build candle summary
-        candle_lines = []
+        # Build M1 candle summary
+        candle_summary = self._build_candle_summary(candles, 30)
         recent = candles[-30:] if len(candles) >= 30 else candles
-        for c in recent:
-            ts = c.timestamp.strftime("%H:%M") if hasattr(c, "timestamp") else ""
-            o = getattr(c, "open", 0)
-            h = getattr(c, "high", 0)
-            l = getattr(c, "low", 0)
-            cl = getattr(c, "close", 0)
-            body = "▲" if cl > o else "▼" if cl < o else "─"
-            candle_lines.append(f"  {ts} O:{o:.5f} H:{h:.5f} L:{l:.5f} C:{cl:.5f} {body}")
-        candle_summary = "\n".join(candle_lines) if candle_lines else "No candle data"
+
+        # Build M15 and H1 summaries
+        m15_summary = self._build_candle_summary(m15_candles, 8) if m15_candles else "Not available"
+        h1_summary = self._build_candle_summary(h1_candles, 6) if h1_candles else "Not available"
+
+        # Get computed market structure
+        structure = self._structure_analyzer.get_cached(symbol)
+        market_structure_text = structure.to_prompt_context() if structure else "Structure data unavailable"
+
+        # TF alignment
+        tf_alignment = self._build_tf_alignment(
+            symbol, candles, m15_candles or [], h1_candles or []
+        )
 
         current_price = getattr(candles[-1], "close", 0) if candles else 0
         day_high = max(getattr(c, "high", 0) for c in candles[-100:]) if candles else 0
@@ -759,8 +1136,11 @@ class GeminiAdvisor:
             open_trades=open_count,
             existing_position=existing,
             candle_count=len(recent),
-            timeframe="M1",
             candle_summary=candle_summary,
+            m15_summary=m15_summary,
+            h1_summary=h1_summary,
+            market_structure=market_structure_text,
+            tf_alignment=tf_alignment,
             ai_regime=cached.market_regime,
             ai_bias=cached.bias,
             ai_confidence=f"{cached.confidence:.0%}",
@@ -797,8 +1177,8 @@ class GeminiAdvisor:
             logger.warning(f"[GEMINI] {symbol} — AI signal missing SL/TP, discarding")
             return None
 
-        # Validate: minimum confidence
-        if signal.confidence < 0.75:
+        # Validate: minimum confidence — use 0.50 as floor for AI signals
+        if signal.confidence < 0.50:
             logger.info(f"[GEMINI] {symbol} — AI confidence too low ({signal.confidence:.0%}), skipping")
             return None
 
@@ -937,12 +1317,33 @@ class GeminiAdvisor:
                     if sym:
                         open_symbols.add(sym)
 
-                # Analyze each pair
+                # Analyze each pair with MULTI-TIMEFRAME data
+                # Toxic pairs list — never waste API calls on these
+                _toxic = {"AUDNZD", "NZDUSD", "NZDCHF", "NZDJPY", "GBPNZD",
+                          "CADJPY", "CHFJPY", "EURCHF", "USDCAD", "XAUUSD"}
                 for symbol in pairs:
+                    if symbol in _toxic:
+                        continue
                     try:
+                        # Fetch M1 candles (execution timeframe)
                         candles = await bridge.get_candles(symbol, "M1", 100)
                         if not candles or len(candles) < 20:
                             continue
+
+                        # Fetch M15 and H1 candles (structure timeframes)
+                        m15_candles = []
+                        h1_candles = []
+                        try:
+                            m15_candles = await bridge.get_candles(symbol, "M15", 50) or []
+                        except Exception as e:
+                            logger.debug(f"M15 fetch failed for {symbol}: {e}")
+                        try:
+                            h1_candles = await bridge.get_candles(symbol, "H1", 24) or []
+                        except Exception as e:
+                            logger.debug(f"H1 fetch failed for {symbol}: {e}")
+
+                        # Cache multi-TF candles
+                        self._mtf_cache[symbol] = {"M1": candles, "M15": m15_candles, "H1": h1_candles}
 
                         # Get spread and price
                         spread = 0
@@ -962,7 +1363,7 @@ class GeminiAdvisor:
                         except Exception:
                             pass
 
-                        # Step 1: Analyze the pair
+                        # Step 1: Analyze the pair with multi-TF data
                         analysis = await self.analyze_pair(
                             symbol=symbol,
                             candles=candles,
@@ -972,6 +1373,8 @@ class GeminiAdvisor:
                             account_equity=equity,
                             open_positions=open_positions,
                             spread=spread,
+                            m15_candles=m15_candles,
+                            h1_candles=h1_candles,
                         )
 
                         # Step 2: If auto_trade is ON and no existing position,
@@ -979,7 +1382,7 @@ class GeminiAdvisor:
                         if (settings.agent.auto_trade
                                 and symbol not in open_symbols
                                 and analysis
-                                and analysis.confidence >= 0.65
+                                and analysis.confidence >= 0.40
                                 and spread <= settings.risk.max_spread_pips):
                             try:
                                 await asyncio.sleep(2)  # Rate limit pause
@@ -994,6 +1397,8 @@ class GeminiAdvisor:
                                     spread=spread,
                                     bid=bid,
                                     ask=ask,
+                                    m15_candles=m15_candles,
+                                    h1_candles=h1_candles,
                                 )
                                 if trade_signal:
                                     # Execute via orchestrator

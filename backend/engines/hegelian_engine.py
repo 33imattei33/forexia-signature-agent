@@ -84,10 +84,12 @@ class HegelianDialecticEngine:
 
         # SYNTHESIS — New York Reversal (Solution Phase)
         # We strike — entering opposite to London's false move
-        if ny_start <= current_time < ny_end:
+        # Extended to cover 13:00-00:00 UTC (includes late NY session)
+        if ny_start <= current_time or current_time < asian_start:
             return SessionPhase.SOLUTION
 
-        return SessionPhase.CLOSED
+        # Fallback — should not reach here on weekdays
+        return SessionPhase.SOLUTION
 
     def is_in_killzone(self, utc_now: Optional[datetime] = None) -> bool:
         """

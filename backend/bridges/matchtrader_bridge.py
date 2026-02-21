@@ -949,12 +949,20 @@ class MatchTraderBridge:
         interval = TIMEFRAME_MAP.get(timeframe, timeframe)
 
         # Calculate from/to based on count and timeframe
+        # Use wide time windows to get maximum history from broker
         now = datetime.now(timezone.utc)
         tf_minutes = {
             "M1": 1, "M5": 5, "M15": 15, "M30": 30,
             "H1": 60, "H4": 240, "D1": 1440, "W1": 10080, "MN": 43200,
         }
-        minutes = tf_minutes.get(interval, 15) * count
+        # Request wider window: at least 10 years for D1/W1, proportional for others
+        minutes = tf_minutes.get(interval, 15) * max(count, 5000)
+        # Floor: minimum 10 years for D1+, 5 years for H4, 1 year for rest
+        min_minutes = {
+            "D1": 5256000, "W1": 5256000, "MN": 5256000,  # ~10 years
+            "H4": 2628000,  # ~5 years
+        }
+        minutes = max(minutes, min_minutes.get(interval, 525600))  # min 1 year
         from_time = now - timedelta(minutes=minutes)
 
         params = {
@@ -1165,18 +1173,31 @@ class MatchTraderBridge:
 
     async def _heartbeat_loop(self):
         """Periodically refresh account data (every 10 seconds)."""
+        _consecutive_failures = 0
+        _MAX_HEARTBEAT_FAILURES = 5
         while self._connected:
             try:
                 await asyncio.sleep(10)
                 account = await self._fetch_balance()
                 if account:
                     self._account_state = account
+                    _consecutive_failures = 0  # Reset on success
                 else:
-                    logger.warning("MatchTrader heartbeat — could not fetch balance")
+                    _consecutive_failures += 1
+                    logger.warning(f"MatchTrader heartbeat — could not fetch balance ({_consecutive_failures}/{_MAX_HEARTBEAT_FAILURES})")
+                    if _consecutive_failures >= _MAX_HEARTBEAT_FAILURES:
+                        logger.error("MatchTrader heartbeat — too many consecutive failures, marking bridge as DISCONNECTED")
+                        self._connected = False
+                        break
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"MatchTrader heartbeat error: {e}")
+                _consecutive_failures += 1
+                logger.error(f"MatchTrader heartbeat error ({_consecutive_failures}/{_MAX_HEARTBEAT_FAILURES}): {e}")
+                if _consecutive_failures >= _MAX_HEARTBEAT_FAILURES:
+                    logger.error("MatchTrader heartbeat — too many errors, marking bridge as DISCONNECTED")
+                    self._connected = False
+                    break
                 await asyncio.sleep(5)
 
     async def _token_refresh_loop(self):
@@ -1184,13 +1205,29 @@ class MatchTraderBridge:
         Refresh the session token every 12 minutes.
         MatchTrader tokens expire after 15 minutes.
         """
+        _consecutive_failures = 0
+        _MAX_REFRESH_FAILURES = 3
         while self._connected:
             try:
                 await asyncio.sleep(12 * 60)  # 12 minutes
                 if self._connected:
-                    await self._refresh_auth()
+                    success = await self._refresh_auth()
+                    if success:
+                        _consecutive_failures = 0
+                    else:
+                        _consecutive_failures += 1
+                        logger.warning(f"Token refresh returned False ({_consecutive_failures}/{_MAX_REFRESH_FAILURES})")
+                        if _consecutive_failures >= _MAX_REFRESH_FAILURES:
+                            logger.error("MatchTrader token refresh — too many consecutive failures, marking bridge as DISCONNECTED")
+                            self._connected = False
+                            break
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Token refresh error: {e}")
+                _consecutive_failures += 1
+                logger.error(f"Token refresh error ({_consecutive_failures}/{_MAX_REFRESH_FAILURES}): {e}")
+                if _consecutive_failures >= _MAX_REFRESH_FAILURES:
+                    logger.error("MatchTrader token refresh — too many errors, marking bridge as DISCONNECTED")
+                    self._connected = False
+                    break
                 await asyncio.sleep(60)

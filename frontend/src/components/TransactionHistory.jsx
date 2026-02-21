@@ -1,11 +1,11 @@
 /**
  * ═══════════════════════════════════════════════════════════════════
- *  FOREXIA — TRANSACTION HISTORY PANEL
- *  Full trade history: open positions, closed trades, agent signals
- *  Close buttons for every open position (manual & bot-placed)
+ *  FOREXIA — FULL TRANSACTION HISTORY PANEL
+ *  Complete trade history: all open, closed trades, agent signals
+ *  Win-rate stats, close buttons, filtering, full scroll view
  * ═══════════════════════════════════════════════════════════════════
  */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 
 const TABS = ['All', 'Open', 'Closed', 'Signals'];
 
@@ -29,12 +29,14 @@ function formatTime(ts) {
 
 export default function TransactionHistory({ brokerConnected, signals = [] }) {
   const [tab, setTab] = useState('All');
-  const [history, setHistory] = useState({ open: [], closed: [], agent_trades: [] });
+  const [history, setHistory] = useState({ open: [], closed: [], agent_trades: [], win_rate_stats: null });
   const [loading, setLoading] = useState(true);
-  const [expanded, setExpanded] = useState(false);
-  const [closingIds, setClosingIds] = useState(new Set());   // IDs currently being closed
-  const [closingAll, setClosingAll] = useState(false);        // "Close All" in progress
-  const [toast, setToast] = useState(null);                   // {type: 'ok'|'err', msg: '...'}
+  const [closingIds, setClosingIds] = useState(new Set());
+  const [closingAll, setClosingAll] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [filterSymbol, setFilterSymbol] = useState('All');
+  const [page, setPage] = useState(1);
+  const ROWS_PER_PAGE = 25;
 
   // Auto-dismiss toast after 4 seconds
   useEffect(() => {
@@ -45,7 +47,7 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
 
   const fetchHistory = useCallback(async () => {
     try {
-      const res = await fetch('/api/trade-history?days=30');
+      const res = await fetch('/api/trade-history?days=9999');
       if (!res.ok) return;
       const data = await res.json();
       setHistory(data);
@@ -55,7 +57,7 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
 
   useEffect(() => {
     fetchHistory();
-    const id = setInterval(fetchHistory, 5000);
+    const id = setInterval(fetchHistory, 2000); // 2s — real-time P&L sync
     return () => clearInterval(id);
   }, [fetchHistory]);
 
@@ -130,6 +132,7 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
   const openRows = (history.open || []).map((t) => ({ ...t, _type: 'open' }));
   const closedRows = (history.closed || []).map((t) => ({ ...t, _type: 'closed' }));
   const agentRows = (history.agent_trades || []).map((t) => ({ ...t, _type: 'agent' }));
+  const stats = history.win_rate_stats || null;
 
   let rows = [];
   if (tab === 'All') rows = [...openRows, ...closedRows, ...agentRows];
@@ -150,9 +153,28 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
     _type: 'signal',
   }));
 
-  // Limit display
-  const maxRows = expanded ? 50 : 8;
-  const displayRows = rows.slice(0, maxRows);
+  // Unique symbols for filter
+  const allSymbols = useMemo(() => {
+    const set = new Set();
+    [...openRows, ...closedRows, ...agentRows].forEach((r) => {
+      const sym = (r.symbol || '').replace('.', '');
+      if (sym) set.add(sym);
+    });
+    return ['All', ...Array.from(set).sort()];
+  }, [history]);
+
+  // Apply symbol filter
+  if (filterSymbol !== 'All') {
+    rows = rows.filter((r) => (r.symbol || '').replace('.', '') === filterSymbol);
+  }
+
+  // Reset page when tab/filter changes
+  useEffect(() => { setPage(1); }, [tab, filterSymbol]);
+
+  // Pagination
+  const totalRows = rows.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / ROWS_PER_PAGE));
+  const displayRows = rows.slice((page - 1) * ROWS_PER_PAGE, page * ROWS_PER_PAGE);
 
   // Summary
   const totalPnl = openRows.reduce((s, r) => s + (r.profit || 0), 0);
@@ -164,7 +186,7 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-3">
           <h2 className="text-xs uppercase tracking-widest text-gray-500 font-bold">
-            Transaction History
+            Full Trade History
           </h2>
           <div className="flex items-center gap-1">
             {TABS.map((t) => (
@@ -181,9 +203,24 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
                 {t === 'Open' && openRows.length > 0 && (
                   <span className="ml-1 text-[8px] text-forexia-accent">{openRows.length}</span>
                 )}
+                {t === 'Closed' && closedRows.length > 0 && (
+                  <span className="ml-1 text-[8px] text-gray-500">{closedRows.length}</span>
+                )}
               </button>
             ))}
           </div>
+          {/* Symbol filter */}
+          {allSymbols.length > 2 && (
+            <select
+              value={filterSymbol}
+              onChange={(e) => setFilterSymbol(e.target.value)}
+              className="bg-forexia-bg border border-forexia-border/40 rounded text-[9px] text-gray-400 px-1.5 py-0.5 font-mono focus:outline-none focus:border-forexia-accent/40"
+            >
+              {allSymbols.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          )}
         </div>
 
         {/* Summary pills + Close All */}
@@ -226,8 +263,60 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
               Closed: {closedPnl >= 0 ? '+' : ''}{closedPnl.toFixed(2)}
             </div>
           )}
+          <div className="px-2 py-0.5 rounded text-[9px] font-mono text-gray-500 border border-forexia-border/20">
+            {totalRows} trade{totalRows !== 1 ? 's' : ''}
+          </div>
         </div>
       </div>
+
+      {/* ═══ WIN RATE STATS BAR ═══ */}
+      {stats && stats.total_trades > 0 && (
+        <div className="flex items-center gap-3 mb-3 px-3 py-2 rounded bg-forexia-bg/80 border border-forexia-border/30">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[9px] text-gray-600 uppercase tracking-wider">Win Rate:</span>
+            <span className={`text-[11px] font-black font-mono ${stats.win_rate >= 50 ? 'text-forexia-green' : 'text-forexia-red'}`}>
+              {stats.win_rate}%
+            </span>
+          </div>
+          <span className="text-forexia-border/40">│</span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[9px] text-gray-600">W/L:</span>
+            <span className="text-[10px] font-bold font-mono text-forexia-green">{stats.wins}</span>
+            <span className="text-[10px] text-gray-700">/</span>
+            <span className="text-[10px] font-bold font-mono text-forexia-red">{stats.losses}</span>
+          </div>
+          <span className="text-forexia-border/40">│</span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[9px] text-gray-600">Net P&L:</span>
+            <span className={`text-[10px] font-bold font-mono ${stats.net_pnl >= 0 ? 'text-forexia-green' : 'text-forexia-red'}`}>
+              {stats.net_pnl >= 0 ? '+' : ''}{stats.net_pnl?.toFixed(2)}
+            </span>
+          </div>
+          <span className="text-forexia-border/40">│</span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[9px] text-gray-600">PF:</span>
+            <span className={`text-[10px] font-bold font-mono ${stats.profit_factor >= 1 ? 'text-forexia-green' : 'text-forexia-red'}`}>
+              {stats.profit_factor}
+            </span>
+          </div>
+          <span className="text-forexia-border/40">│</span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[9px] text-gray-600">Avg W/L:</span>
+            <span className="text-[10px] font-mono text-forexia-green">+{stats.avg_win?.toFixed(2)}</span>
+            <span className="text-[10px] text-gray-700">/</span>
+            <span className="text-[10px] font-mono text-forexia-red">-{stats.avg_loss?.toFixed(2)}</span>
+          </div>
+          {stats.reward_risk_ratio > 0 && (
+            <>
+              <span className="text-forexia-border/40">│</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] text-gray-600">R:R:</span>
+                <span className="text-[10px] font-bold font-mono text-forexia-accent">{stats.reward_risk_ratio}</span>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Toast notification */}
       {toast && (
@@ -253,50 +342,76 @@ export default function TransactionHistory({ brokerConnected, signals = [] }) {
           )}
         </div>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left">
-            <thead>
-              <tr className="text-[9px] uppercase tracking-wider text-gray-600 border-b border-forexia-border/40">
-                <th className="py-1.5 px-2">Status</th>
-                <th className="py-1.5 px-2">Symbol</th>
-                <th className="py-1.5 px-2">Side</th>
-                <th className="py-1.5 px-2">Volume</th>
-                <th className="py-1.5 px-2">Entry</th>
-                <th className="py-1.5 px-2">SL/TP</th>
-                <th className="py-1.5 px-2">Exit</th>
-                <th className="py-1.5 px-2 text-right">P&L</th>
-                <th className="py-1.5 px-2">Info</th>
-                <th className="py-1.5 px-2 text-center w-12"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {displayRows.map((row, i) => (
-                <TradeRow
-                  key={`${row._type}-${row.id || row.ticket || i}`}
-                  row={row}
-                  onClose={handleClose}
-                  isClosing={closingIds.has(row.id || String(row.ticket))}
-                />
-              ))}
-            </tbody>
-          </table>
+        <div>
+          <div className="overflow-x-auto max-h-[500px] overflow-y-auto scrollbar-thin scrollbar-thumb-forexia-border scrollbar-track-transparent">
+            <table className="w-full text-left">
+              <thead className="sticky top-0 bg-forexia-panel z-10">
+                <tr className="text-[9px] uppercase tracking-wider text-gray-600 border-b border-forexia-border/40">
+                  <th className="py-1.5 px-2">Status</th>
+                  <th className="py-1.5 px-2">Symbol</th>
+                  <th className="py-1.5 px-2">Side</th>
+                  <th className="py-1.5 px-2">Volume</th>
+                  <th className="py-1.5 px-2">Entry</th>
+                  <th className="py-1.5 px-2">SL/TP</th>
+                  <th className="py-1.5 px-2">Exit</th>
+                  <th className="py-1.5 px-2 text-right">P&L</th>
+                  <th className="py-1.5 px-2">Info</th>
+                  <th className="py-1.5 px-2 text-center w-12"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {displayRows.map((row, i) => (
+                  <TradeRow
+                    key={`${row._type}-${row.id || row.ticket || i}`}
+                    row={row}
+                    onClose={handleClose}
+                    isClosing={closingIds.has(row.id || String(row.ticket))}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
 
-          {/* Show more */}
-          {rows.length > maxRows && !expanded && (
-            <button
-              onClick={() => setExpanded(true)}
-              className="w-full py-1.5 text-[10px] text-forexia-accent hover:text-white transition mt-1"
-            >
-              Show {rows.length - maxRows} more →
-            </button>
-          )}
-          {expanded && rows.length > 8 && (
-            <button
-              onClick={() => setExpanded(false)}
-              className="w-full py-1.5 text-[10px] text-gray-500 hover:text-gray-400 transition mt-1"
-            >
-              Show less ↑
-            </button>
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between mt-2 pt-2 border-t border-forexia-border/20">
+              <span className="text-[9px] text-gray-600 font-mono">
+                Showing {(page - 1) * ROWS_PER_PAGE + 1}–{Math.min(page * ROWS_PER_PAGE, totalRows)} of {totalRows}
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setPage(1)}
+                  disabled={page === 1}
+                  className="px-1.5 py-0.5 rounded text-[9px] text-gray-500 hover:text-white hover:bg-forexia-accent/10 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                >
+                  ««
+                </button>
+                <button
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page === 1}
+                  className="px-1.5 py-0.5 rounded text-[9px] text-gray-500 hover:text-white hover:bg-forexia-accent/10 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                >
+                  ‹ Prev
+                </button>
+                <span className="px-2 text-[9px] text-gray-400 font-mono">
+                  {page} / {totalPages}
+                </span>
+                <button
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page === totalPages}
+                  className="px-1.5 py-0.5 rounded text-[9px] text-gray-500 hover:text-white hover:bg-forexia-accent/10 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                >
+                  Next ›
+                </button>
+                <button
+                  onClick={() => setPage(totalPages)}
+                  disabled={page === totalPages}
+                  className="px-1.5 py-0.5 rounded text-[9px] text-gray-500 hover:text-white hover:bg-forexia-accent/10 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                >
+                  »»
+                </button>
+              </div>
+            </div>
           )}
         </div>
       )}

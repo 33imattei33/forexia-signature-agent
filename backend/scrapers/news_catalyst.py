@@ -400,4 +400,7 @@ class NewsCatalystEngine:
             except Exception as e:
                 logger.error(f"Auto-refresh failed: {e}")
 
-            await asyncio.sleep(self.config.scrape_interval_minutes * 60)
+            try:
+                await asyncio.sleep(self.config.scrape_interval_minutes * 60)
+            except asyncio.CancelledError:
+                break

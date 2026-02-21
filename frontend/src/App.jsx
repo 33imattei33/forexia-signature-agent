@@ -22,7 +22,7 @@
  *  └───────────────────────────┴───────────────────────────────────┘
  * ═══════════════════════════════════════════════════════════════════
  */
-import React, { useCallback, useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { useDashboard, useSession, useControls, useHealth } from './hooks/useForexia';
 
 import AccountPanel from './components/AccountPanel';
@@ -80,12 +80,27 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tradeRefreshKey, setTradeRefreshKey] = useState(0);
 
+  /* ───── Client-side UTC phase detection (fallback) ───── */
+  const getClientPhase = () => {
+    const now = new Date();
+    const day = now.getUTCDay();
+    if (day === 0 || day === 6) return 'MARKET_CLOSED';
+    const h = now.getUTCHours();
+    if (h >= 0 && h < 8) return 'ASIAN_CONSOLIDATION';
+    if (h >= 8 && h < 13) return 'LONDON_INDUCTION';
+    return 'NEWYORK_REVERSAL';
+  };
+  const getClientTradingPermitted = () => {
+    const day = new Date().getUTCDay();
+    return day >= 1 && day <= 5; // Mon-Fri
+  };
+
   /* ───── Derived state ───── */
   const account = dashboard?.account || {};
-  const phase = dashboard?.current_session || session?.session_phase || 'UNKNOWN';
+  const phase = dashboard?.current_session || session?.session_phase || getClientPhase();
   const weeklyAct = dashboard?.current_weekly_act || session?.weekly_act || 'CONNECTOR';
   const inductionScore = dashboard?.induction_meter ?? 0;
-  const tradingPermitted = session?.trading_permitted ?? false;
+  const tradingPermitted = session?.trading_permitted ?? getClientTradingPermitted();
   const activeSignals = signals?.length ?? 0;
   const todayTrades = account?.total_trades_today ?? 0;
   const dailyPnL = account?.daily_pnl ?? 0;
@@ -167,7 +182,7 @@ export default function App() {
 
           {/* Control Buttons */}
           <div className="flex items-center gap-2">
-            <ControlButton label="Settings" onClick={() => setSettingsOpen(true)} variant="accent" />
+            <ControlButton label="Settings" onClick={() => setSettingsOpen(true)} variant="default" />
             <ControlButton label="Scrape News" onClick={scrapeNews} variant="default" />
             <ControlButton label="Arm Trauma" onClick={armTrauma} variant="default" />
             <ControlButton label="Daily Reset" onClick={handleResetDaily} variant="default" />
@@ -263,6 +278,19 @@ export default function App() {
           </span>
         </div>
       </footer>
+
+      {/* ═══ FLOATING ADMIN BUTTON — navigates to standalone admin page ═══ */}
+      <a
+        href="/admin.html"
+        style={{ position: 'fixed', bottom: 24, right: 24, zIndex: 9999, textDecoration: 'none' }}
+        className="group flex items-center gap-2 px-5 py-3 rounded-full bg-gradient-to-r from-forexia-gold/20 to-yellow-600/20 border border-forexia-gold/40 text-forexia-gold hover:from-forexia-gold/30 hover:to-yellow-600/30 hover:border-forexia-gold/60 hover:shadow-[0_0_20px_rgba(245,158,11,0.25)] transition-all duration-300 backdrop-blur-sm"
+        title="Super Admin Dashboard"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        </svg>
+        <span className="text-[11px] font-black uppercase tracking-widest">Super Admin</span>
+      </a>
 
       {/* ═══ SETTINGS MODAL ═══ */}
       <SettingsPanel isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
